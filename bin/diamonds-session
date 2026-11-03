@@ -1,0 +1,41 @@
+#!/bin/sh
+# diamonds-session: Production Startup Script for Diamonds Desktop Compositor & Shell
+# Configured by @toolkit-optimizer for maximum Wayland smoothness, zero-copy, and dark mode sync.
+
+set -e
+
+# 1. Force Pure Wayland Mode for All External Toolkits
+export GDK_BACKEND="wayland,x11"
+export QT_QPA_PLATFORM="wayland;xcb"
+export QT_WAYLAND_DISABLE_WINDOWDECORATION=1
+export MOZ_ENABLE_WAYLAND=1
+export CLUTTER_BACKEND=wayland
+export SDL_VIDEODRIVER=wayland
+export _JAVA_AWT_WM_NONREPARENTING=1
+
+# 2. XDG Desktop Environment Identity
+export XDG_CURRENT_DESKTOP="diamonds"
+export XDG_SESSION_DESKTOP="diamonds"
+export XDG_SESSION_TYPE="wayland"
+
+# 3. System-Wide Dark Theme Synchronization (Graphite Dark Mica)
+if command -v gsettings >/dev/null 2>&1; then
+    gsettings set org.gnome.desktop.interface color-scheme 'prefer-dark' 2>/dev/null || true
+    gsettings set org.gnome.desktop.interface gtk-theme 'Adwaita-dark' 2>/dev/null || true
+fi
+
+# 4. Locate and Execute diamonds-desktop binary
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+
+if [ -x "$PROJECT_ROOT/build/diamonds-desktop" ]; then
+    EXEC_PATH="$PROJECT_ROOT/build/diamonds-desktop"
+elif command -v diamonds-desktop >/dev/null 2>&1; then
+    EXEC_PATH="diamonds-desktop"
+else
+    echo "[diamonds-session] Error: diamonds-desktop binary not found." >&2
+    exit 1
+fi
+
+echo "[diamonds-session] Launching pure Wayland compositor: $EXEC_PATH"
+exec "$EXEC_PATH" "$@"

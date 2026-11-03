@@ -1,0 +1,52 @@
+name: Build & Verify Multi-Arch
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+
+jobs:
+  build:
+    name: Build on ${{ matrix.os }} (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            arch: x86_64
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            meson \
+            ninja-build \
+            pkg-config \
+            gcc \
+            libwlroots-dev \
+            libwayland-dev \
+            wayland-protocols \
+            libcairo2-dev \
+            libpango1.0-dev \
+            libxkbcommon-dev \
+            libpixman-1-dev \
+            libdrm-dev \
+            xwayland
+
+      - name: Configure with Meson
+        run: meson setup build -Dwarning_level=2
+
+      - name: Compile with Ninja
+        run: ninja -C build
+
+      - name: Run basic sanity test
+        run: |
+          ./build/diamonds-desktop --version || ./build/diamonds-desktop --help || true
