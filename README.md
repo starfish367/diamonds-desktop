@@ -104,6 +104,24 @@ ninja -C build
 ./build/diamonds-store
 ```
 
+## 📦 Đóng Gói APT (.deb) cho x86_64 & ARM64
+
+Tạo file cài đặt `.deb` để cài đặt trực tiếp qua `apt`:
+
+```bash
+# Tự động nhận diện kiến trúc hiện tại (amd64 hoặc arm64) và đóng gói .deb:
+./scripts/package-deb.sh 0.1.0
+
+# Cài đặt qua APT (tự động phân giải toàn bộ dependencies):
+sudo apt install ./diamonds-desktop_0.1.0_amd64.deb    # Trên x86_64
+# hoặc
+sudo apt install ./diamonds-desktop_0.1.0_arm64.deb    # Trên ARM64 / Armbian / RPi
+```
+
+Sau khi cài đặt xong qua APT:
+- Xuất hiện tùy chọn **Diamonds Desktop** ngay tại màn hình đăng nhập (GDM / SDDM / LightDM).
+- Hoặc khởi chạy từ dòng lệnh: `diamonds-session`.
+
 ## 📜 License
 
 [MIT License](LICENSE) © 2026 Diamonds Desktop Contributors

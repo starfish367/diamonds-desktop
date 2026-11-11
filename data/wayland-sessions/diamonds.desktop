@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=Diamonds Desktop
+Comment=Lightweight 100% Wayland Compositor & Shell
+Exec=diamonds-session
+Type=Application
+DesktopNames=diamonds

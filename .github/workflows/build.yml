@@ -52,3 +52,15 @@ jobs:
       - name: Run basic sanity test
         run: |
           ./build/diamonds-desktop --version || ./build/diamonds-desktop --help || true
+
+      - name: Build Debian Package (.deb)
+        run: |
+          sudo apt-get install -y --no-install-recommends binutils file dpkg-dev
+          ./scripts/package-deb.sh 0.1.0
+
+      - name: Upload Debian Package (.deb) Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: diamonds-desktop-${{ matrix.arch }}-deb
+          path: "*.deb"
+

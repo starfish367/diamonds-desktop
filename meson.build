@@ -235,3 +235,15 @@ install_data(
   ],
   install_dir: get_option('datadir') / 'applications',
 )
+
+install_data(
+  'data/wayland-sessions/diamonds.desktop',
+  install_dir: get_option('datadir') / 'wayland-sessions',
+)
+
+install_data(
+  'bin/diamonds-session',
+  install_dir: get_option('bindir'),
+  install_mode: 'rwxr-xr-x',
+)
+
