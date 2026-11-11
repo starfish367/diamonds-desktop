@@ -38,10 +38,15 @@ struct diamonds_startmenu {
 	int pinned_count;
 
 	/* Real-time Search and Filter */
-	char search_query[64];
-	int search_query_len;
+	char search_query[128];
+	int search_len;
 	int filtered_indices[MAX_STARTMENU_APPS];
 	int filtered_count;
+
+	/* Hover state */
+	int hover_app_idx;     /* Row in filtered list currently hovered (-1 for none) */
+	int hover_pinned_idx;  /* Index in pinned grid currently hovered (-1 for none) */
+	int hover_power_btn;   /* 1: Lock, 2: Reboot, 3: Shutdown (0 for none) */
 
 	/* Vertical scrolling for left app list */
 	double scroll_offset;
@@ -58,6 +63,10 @@ void diamonds_startmenu_render(struct diamonds_startmenu *menu);
 void diamonds_startmenu_toggle(struct diamonds_startmenu *menu);
 void diamonds_startmenu_set_visible(struct diamonds_startmenu *menu, bool visible);
 bool diamonds_startmenu_handle_click(struct diamonds_startmenu *menu, double lx, double ly);
+bool diamonds_startmenu_handle_motion(struct diamonds_startmenu *menu, double lx, double ly);
+bool diamonds_startmenu_handle_key_event(struct diamonds_startmenu *menu,
+		struct xkb_state *xkb_state, uint32_t keycode,
+		const xkb_keysym_t *syms, int nsyms);
 bool diamonds_startmenu_handle_key(struct diamonds_startmenu *menu, xkb_keysym_t sym, enum wl_keyboard_key_state state);
 bool diamonds_startmenu_handle_scroll(struct diamonds_startmenu *menu, double lx, double ly, double delta);
 

@@ -1,20 +1,22 @@
 #include "snap.h"
 #include "diamonds.h"
+#include "titlebar.h"
 #include "sound.h"
 
 #include <stdlib.h>
 #include <pixman.h>
 
-#define TOPBAR_HEIGHT 32
-#define DOCK_RESERVE  58
+#define TOPBAR_HEIGHT 30
+#define DOCK_RESERVE  44
 
 diamonds_snap_zone_t diamonds_detect_snap_zone(double cx, double cy, int32_t output_w, int32_t output_h) {
 	if (output_w <= 0 || output_h <= 0) {
 		return SNAP_NONE;
 	}
 
-	const double corner_thresh = 40.0;
-	const double edge_thresh = 18.0;
+	const double corner_thresh = 42.0;
+	const double edge_thresh = 20.0;
+	const double top_thresh = 34.0;
 
 	/* 1. Corners (Quadrants 25/25/25/25) */
 	if (cx < corner_thresh && cy < corner_thresh) {
@@ -31,7 +33,7 @@ diamonds_snap_zone_t diamonds_detect_snap_zone(double cx, double cy, int32_t out
 	}
 
 	/* 2. Edges (50/50 and Maximize) */
-	if (cy < edge_thresh) {
+	if (cy < top_thresh) {
 		return SNAP_MAXIMIZE;
 	}
 	if (cx < edge_thresh) {
@@ -224,17 +226,44 @@ void diamonds_apply_snap(
 		return;
 	}
 
+	if (zone == SNAP_MAXIMIZE) {
+		if (!toplevel->is_maximized) {
+			diamonds_window_toggle_maximize(toplevel, NULL);
+		} else {
+			/* Already flagged maximized, ensure position & size match full workarea */
+			toplevel->is_maximized = false;
+			diamonds_window_toggle_maximize(toplevel, NULL);
+		}
+		diamonds_sound_play(DIAMONDS_SOUND_SNAP);
+		return;
+	}
+
 	int32_t tx, ty, tw, th;
 	calculate_zone_geometry(zone, output_w, output_h, &tx, &ty, &tw, &th);
 	if (tw <= 0 || th <= 0) return;
 
+	toplevel->is_maximized = false;
+	wlr_xdg_toplevel_set_maximized(toplevel->xdg_toplevel, false);
+	wlr_xdg_toplevel_set_tiled(toplevel->xdg_toplevel,
+		WLR_EDGE_TOP | WLR_EDGE_BOTTOM | WLR_EDGE_LEFT | WLR_EDGE_RIGHT);
+
 	/* Position toplevel */
 	wlr_scene_node_set_position(&toplevel->scene_tree->node, tx, ty);
 
-	/* Set client dimensions (titlebar uses 32px height) */
-	int32_t client_h = th - 32;
+	/* Set client dimensions (only subtract titlebar height if SSD titlebar is active) */
+	int32_t client_h = th;
+	if (toplevel->titlebar_scene_buffer) {
+		client_h -= TITLEBAR_HEIGHT;
+	}
 	if (client_h < 50) client_h = 50;
 	wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, tw, client_h);
+
+	if (toplevel->titlebar_scene_buffer) {
+		diamonds_toplevel_update_titlebar(toplevel);
+	}
+	if (toplevel->server && toplevel->server->wl_display) {
+		wl_display_flush_clients(toplevel->server->wl_display);
+	}
 
 	/* Play satisfying snap sound */
 	diamonds_sound_play(DIAMONDS_SOUND_SNAP);

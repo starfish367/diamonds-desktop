@@ -7,6 +7,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <signal.h>
 #include <math.h>
 #include <time.h>
@@ -21,81 +22,96 @@
 
 #define FONT_BASE "Segoe UI, Cantarell, DejaVu Sans, Ubuntu, sans-serif"
 
-static void find_dock_app_window(struct diamonds_server *server,
-		const char *kw1, const char *kw2,
-		struct diamonds_toplevel **out_toplevel,
-		struct diamonds_xwayland_surface **out_xsurface,
-		pid_t *out_pid) {
-	*out_toplevel = NULL;
-	if (out_xsurface) *out_xsurface = NULL;
-	*out_pid = 0;
-	if (!server) return;
-
-	/* 1. Check toplevels (Wayland) */
+struct pinned_def {
+	const char *name;
+	const char *kw1;
+	const char *kw2;
+	const char *icon_key;
+	bool is_running;
+	bool is_focused;
 	struct diamonds_toplevel *toplevel;
-	wl_list_for_each(toplevel, &server->toplevels, link) {
-		if (!toplevel->xdg_toplevel) continue;
-		const char *app_id = toplevel->xdg_toplevel->app_id;
-		const char *title = toplevel->xdg_toplevel->title;
-		bool match = false;
-		if (kw1 && ((app_id && strcasestr(app_id, kw1)) || (title && strcasestr(title, kw1)))) match = true;
-		if (kw2 && ((app_id && strcasestr(app_id, kw2)) || (title && strcasestr(title, kw2)))) match = true;
-		if (match) {
-			*out_toplevel = toplevel;
-			struct wl_resource *res = toplevel->xdg_toplevel->resource ?
-				toplevel->xdg_toplevel->resource :
-				(toplevel->xdg_toplevel->base ? toplevel->xdg_toplevel->base->resource : NULL);
-			if (res) {
-				struct wl_client *client = wl_resource_get_client(res);
-				if (client) {
-					wl_client_get_credentials(client, out_pid, NULL, NULL);
-				}
-			}
-			return;
-		}
-	}
-
 #ifdef DIAMONDS_ENABLE_XWAYLAND
-	/* 2. Check XWayland surfaces (X11) */
 	struct diamonds_xwayland_surface *xsurface;
-	wl_list_for_each(xsurface, &server->xwayland_surfaces, link) {
-		if (!xsurface->xsurface) continue;
-		const char *class = xsurface->xsurface->class;
-		const char *instance = xsurface->xsurface->instance;
-		const char *title = xsurface->xsurface->title;
-		bool match = false;
-		if (kw1 && ((class && strcasestr(class, kw1)) || (instance && strcasestr(instance, kw1)) || (title && strcasestr(title, kw1)))) match = true;
-		if (kw2 && ((class && strcasestr(class, kw2)) || (instance && strcasestr(instance, kw2)) || (title && strcasestr(title, kw2)))) match = true;
-		if (match) {
-			if (out_xsurface) *out_xsurface = xsurface;
-			*out_pid = xsurface->xsurface->pid;
-			return;
-		}
-	}
 #endif
-}
+	pid_t pid;
+};
 
-static void check_dock_app_state(struct diamonds_server *server,
-		const char *kw1, const char *kw2,
-		bool *is_running, bool *is_focused) {
-	*is_running = false;
-	*is_focused = false;
-	if (!server) return;
+static void draw_window_initials_icon(cairo_t *cr, double ix, double iy, double size, const char *name) {
+	/* 1. Window card background */
+	diamonds_draw_rounded_rect(cr, ix, iy, size, size, 5.0);
+	cairo_set_source_rgba(cr, 0.12, 0.14, 0.22, 0.95);
+	cairo_fill_preserve(cr);
+	cairo_set_source_rgba(cr, 0.22, 0.74, 0.97, 0.50);
+	cairo_set_line_width(cr, 1.0);
+	cairo_stroke(cr);
 
-	struct diamonds_toplevel *toplevel = NULL;
-	struct diamonds_xwayland_surface *xsurface = NULL;
-	pid_t pid = 0;
-	find_dock_app_window(server, kw1, kw2, &toplevel, &xsurface, &pid);
+	/* 2. Mini top window bar */
+	cairo_new_path(cr);
+	cairo_move_to(cr, ix + 2.0, iy + 6.0);
+	cairo_line_to(cr, ix + size - 2.0, iy + 6.0);
+	cairo_set_source_rgba(cr, 0.25, 0.28, 0.40, 0.7);
+	cairo_set_line_width(cr, 0.8);
+	cairo_stroke(cr);
 
-	if (toplevel) {
-		*is_running = true;
-		if (server->focused_toplevel == toplevel) {
-			*is_focused = true;
+	/* 3. 3 dots on top bar */
+	cairo_arc(cr, ix + 4.5, iy + 3.5, 1.0, 0.0, 2.0 * M_PI);
+	cairo_set_source_rgba(cr, 0.94, 0.35, 0.35, 0.9);
+	cairo_fill(cr);
+	cairo_arc(cr, ix + 8.0, iy + 3.5, 1.0, 0.0, 2.0 * M_PI);
+	cairo_set_source_rgba(cr, 0.96, 0.76, 0.25, 0.9);
+	cairo_fill(cr);
+	cairo_arc(cr, ix + 11.5, iy + 3.5, 1.0, 0.0, 2.0 * M_PI);
+	cairo_set_source_rgba(cr, 0.35, 0.85, 0.45, 0.9);
+	cairo_fill(cr);
+
+	/* 4. Extract 2 uppercase initials */
+	char initials[3] = "AP";
+	if (name && *name) {
+		const char *p = name;
+		while (*p && !isalnum((unsigned char)*p)) p++;
+		if (*p) {
+			initials[0] = toupper((unsigned char)*p);
+			p++;
+			const char *space = strchr(p, ' ');
+			if (space) {
+				while (*space && !isalnum((unsigned char)*space)) space++;
+				if (*space) {
+					initials[1] = toupper((unsigned char)*space);
+				} else if (*p && isalnum((unsigned char)*p)) {
+					initials[1] = toupper((unsigned char)*p);
+				}
+			} else if (*p && isalnum((unsigned char)*p)) {
+				initials[1] = toupper((unsigned char)*p);
+			} else {
+				initials[1] = '\0';
+			}
 		}
-	} else if (xsurface) {
-		*is_running = true;
+	}
+	initials[2] = '\0';
+
+	/* 5. Render 2 letters centered using Pango */
+	PangoLayout *layout = pango_cairo_create_layout(cr);
+	if (layout) {
+		PangoFontDescription *desc = pango_font_description_from_string(FONT_BASE " Bold 7.5");
+		pango_layout_set_font_description(layout, desc);
+		pango_font_description_free(desc);
+		pango_layout_set_text(layout, initials, -1);
+		int tw, th;
+		pango_layout_get_pixel_size(layout, &tw, &th);
+		cairo_move_to(cr, ix + (size - tw) / 2.0, iy + 7.0 + (size - 7.0 - th) / 2.0);
+		cairo_set_source_rgba(cr, 0.95, 0.97, 1.0, 1.0);
+		pango_cairo_show_layout(cr, layout);
+		g_object_unref(layout);
 	}
 }
+
+static struct pinned_def g_pinned_defaults[5] = {
+	{ .name = "Terminal", .kw1 = "term", .kw2 = "bash", .icon_key = "terminal" },
+	{ .name = "Files", .kw1 = "diamonds-files", .kw2 = "nautilus", .icon_key = "files" },
+	{ .name = "Thorium", .kw1 = "thorium", .kw2 = "chromium", .icon_key = "browser" },
+	{ .name = "VLC", .kw1 = "vlc", .kw2 = NULL, .icon_key = "vlc" },
+	{ .name = "Settings", .kw1 = "diamonds-settings", .kw2 = "settings", .icon_key = "settings" },
+};
 
 struct diamonds_dock *diamonds_dock_create(struct diamonds_server *server) {
 	struct diamonds_dock *dock = calloc(1, sizeof(*dock));
@@ -104,11 +120,12 @@ struct diamonds_dock *diamonds_dock_create(struct diamonds_server *server) {
 	}
 
 	dock->server = server;
-	dock->width = 460;
-	dock->height = 48;
-	dock->margin_bottom = 8;
-	dock->corner_radius = 10;
-	dock->is_full_width = false;
+	dock->width = 1920;
+	dock->height = 44;
+	dock->margin_bottom = 0;
+	dock->corner_radius = 0;
+	dock->is_full_width = true;
+	dock->dynamic_item_count = 0;
 
 	dock->buffer = diamonds_cairo_buffer_create(dock->width, dock->height);
 	if (!dock->buffer) {
@@ -125,8 +142,8 @@ struct diamonds_dock *diamonds_dock_create(struct diamonds_server *server) {
 
 	/* Initialize Right-Click Popup Context Menu */
 	dock->popup.dock = dock;
-	dock->popup.width = 180;
-	dock->popup.height = 72;
+	dock->popup.width = 160;
+	dock->popup.height = 76;
 	dock->popup.visible = false;
 	dock->popup.buffer = diamonds_cairo_buffer_create(dock->popup.width, dock->popup.height);
 	if (dock->popup.buffer) {
@@ -136,7 +153,7 @@ struct diamonds_dock *diamonds_dock_create(struct diamonds_server *server) {
 		}
 	}
 
-	diamonds_dock_render(dock);
+	diamonds_dock_reposition(dock, 1920, 1080);
 	return dock;
 }
 
@@ -144,90 +161,33 @@ void diamonds_dock_destroy(struct diamonds_dock *dock) {
 	if (!dock) {
 		return;
 	}
-
 	if (dock->popup.scene_buffer) {
 		wlr_scene_node_destroy(&dock->popup.scene_buffer->node);
 	}
 	if (dock->popup.buffer) {
 		wlr_buffer_drop(&dock->popup.buffer->base);
 	}
-
 	if (dock->scene_buffer) {
 		wlr_scene_node_destroy(&dock->scene_buffer->node);
 	}
-
 	if (dock->buffer) {
 		wlr_buffer_drop(&dock->buffer->base);
 	}
-
 	free(dock);
 }
 
 void diamonds_dock_reposition(struct diamonds_dock *dock, int32_t output_width, int32_t output_height) {
-	if (!dock || !dock->scene_buffer || output_width <= 0 || output_height <= 0) {
+	if (!dock || !dock->scene_buffer) {
 		return;
 	}
 
-	bool is_docked = false;
-
-	/* Check toplevels: if any window is maximized or touches the bottom area */
-	struct diamonds_toplevel *toplevel;
-	wl_list_for_each(toplevel, &dock->server->toplevels, link) {
-		if (!toplevel->scene_tree || !toplevel->scene_tree->node.enabled) continue;
-		if (toplevel->is_maximized) {
-			is_docked = true;
-			break;
-		}
-		int wy = toplevel->scene_tree->node.y;
-		int wh = toplevel->xdg_toplevel ? toplevel->xdg_toplevel->current.height : 400;
-		if (toplevel->titlebar_scene_buffer) {
-			wh += 32; /* TITLEBAR_HEIGHT */
-		}
-		if (wy + wh >= output_height - 56) {
-			is_docked = true;
-			break;
-		}
-	}
-
-#ifdef DIAMONDS_ENABLE_XWAYLAND
-	if (!is_docked) {
-		struct diamonds_xwayland_surface *xsurface;
-		wl_list_for_each(xsurface, &dock->server->xwayland_surfaces, link) {
-			if (!xsurface->scene_tree || !xsurface->scene_tree->node.enabled) continue;
-			if (xsurface->is_maximized || (xsurface->xsurface && (xsurface->xsurface->maximized_vert || xsurface->xsurface->maximized_horz))) {
-				is_docked = true;
-				break;
-			}
-			int wy = xsurface->xsurface ? xsurface->xsurface->y : 0;
-			int wh = xsurface->xsurface ? xsurface->xsurface->height : 400;
-			if (wy + wh >= output_height - 56) {
-				is_docked = true;
-				break;
-			}
-		}
-	}
-#endif
-
-	int32_t new_w, new_h, new_x, new_y, new_r, new_mb;
-	if (is_docked) {
-		/* Full-width flat Windows-style Taskbar at screen bottom */
-		new_w = output_width;
-		new_h = 44;
-		new_x = 0;
-		new_y = output_height - 44;
-		new_r = 0;
-		new_mb = 0;
-		dock->is_full_width = true;
-	} else {
-		/* Floating Dock */
-		new_w = 460;
-		new_h = 48;
-		new_mb = 8;
-		new_r = 10;
-		new_x = (output_width - new_w) / 2;
-		new_y = output_height - new_h - new_mb;
-		dock->is_full_width = false;
-	}
+	int32_t new_w = output_width;
+	int32_t new_h = 44;
+	int32_t new_x = 0;
+	int32_t new_y = output_height - 44;
+	int32_t new_r = 0;
+	int32_t new_mb = 0;
+	dock->is_full_width = true;
 
 	if (dock->width != new_w || dock->height != new_h) {
 		dock->width = new_w;
@@ -248,7 +208,7 @@ void diamonds_dock_reposition(struct diamonds_dock *dock, int32_t output_width, 
 }
 
 void diamonds_dock_render(struct diamonds_dock *dock) {
-	if (!dock || !dock->buffer || !dock->buffer->cairo_surface) {
+	if (!dock || !dock->buffer || !dock->buffer->cairo_surface || !dock->server) {
 		return;
 	}
 
@@ -292,20 +252,140 @@ void diamonds_dock_render(struct diamonds_dock *dock) {
 		cairo_stroke(cr);
 	}
 
-	/* 3. Center Content (Start + 5 Icons + Trash) */
-	/* Total content width:
-	 * Start (24) + sep_gap (14) + sep (1) + gap (14) + 5 icons (5 * 24 + 4 * 22 = 208)
-	 * + gap (14) + sep (1) + gap (14) + Trash (24) = ~314px
+	/* 3. Collect Pinned and Dynamic windows from server toplevels & xsurfaces */
+	struct pinned_def pinned[5];
+	memcpy(pinned, g_pinned_defaults, sizeof(pinned));
+	for (int k = 0; k < 5; k++) {
+		pinned[k].is_running = false;
+		pinned[k].is_focused = false;
+		pinned[k].toplevel = NULL;
+#ifdef DIAMONDS_ENABLE_XWAYLAND
+		pinned[k].xsurface = NULL;
+#endif
+		pinned[k].pid = 0;
+	}
+
+	dock->dynamic_item_count = 0;
+
+	/* 3a. Scan Wayland toplevels */
+	struct diamonds_toplevel *toplevel;
+	wl_list_for_each(toplevel, &dock->server->toplevels, link) {
+		if (!toplevel->xdg_toplevel) continue;
+		const char *app_id = toplevel->xdg_toplevel->app_id;
+		const char *title = toplevel->xdg_toplevel->title;
+
+		int match_idx = -1;
+		for (int k = 0; k < 5; k++) {
+			bool match = false;
+			if (pinned[k].kw1 && ((app_id && strcasestr(app_id, pinned[k].kw1)) || (title && strcasestr(title, pinned[k].kw1)))) match = true;
+			if (pinned[k].kw2 && ((app_id && strcasestr(app_id, pinned[k].kw2)) || (title && strcasestr(title, pinned[k].kw2)))) match = true;
+			if (match && pinned[k].toplevel == NULL) {
+				match_idx = k;
+				break;
+			}
+		}
+
+		pid_t pid = 0;
+		struct wl_resource *res = toplevel->xdg_toplevel->resource ?
+			toplevel->xdg_toplevel->resource :
+			(toplevel->xdg_toplevel->base ? toplevel->xdg_toplevel->base->resource : NULL);
+		if (res) {
+			struct wl_client *client = wl_resource_get_client(res);
+			if (client) wl_client_get_credentials(client, &pid, NULL, NULL);
+		}
+
+		bool is_focused = (dock->server->focused_toplevel == toplevel);
+
+		if (match_idx >= 0) {
+			pinned[match_idx].is_running = true;
+			if (is_focused) pinned[match_idx].is_focused = true;
+			pinned[match_idx].toplevel = toplevel;
+			pinned[match_idx].pid = pid;
+		} else {
+			if (dock->dynamic_item_count < MAX_DOCK_DYNAMIC_ITEMS) {
+				struct diamonds_dock_dynamic_item *dyn = &dock->dynamic_items[dock->dynamic_item_count++];
+				dyn->toplevel = toplevel;
+#ifdef DIAMONDS_ENABLE_XWAYLAND
+				dyn->xsurface = NULL;
+#endif
+				snprintf(dyn->app_id, sizeof(dyn->app_id), "%s", app_id ? app_id : "");
+				snprintf(dyn->title, sizeof(dyn->title), "%s", title ? title : (app_id ? app_id : "Application"));
+				dyn->pid = pid;
+				dyn->is_focused = is_focused;
+				dyn->is_running = true;
+			}
+		}
+	}
+
+#ifdef DIAMONDS_ENABLE_XWAYLAND
+	/* 3b. Scan XWayland surfaces */
+	struct diamonds_xwayland_surface *xsurface;
+	wl_list_for_each(xsurface, &dock->server->xwayland_surfaces, link) {
+		if (!xsurface->xsurface || !xsurface->xsurface->surface) continue;
+		if (xsurface->xsurface->override_redirect) continue;
+		const char *class = xsurface->xsurface->class;
+		const char *instance = xsurface->xsurface->instance;
+		const char *title = xsurface->xsurface->title;
+
+		int match_idx = -1;
+		for (int k = 0; k < 5; k++) {
+			bool match = false;
+			if (pinned[k].kw1 && ((class && strcasestr(class, pinned[k].kw1)) || (instance && strcasestr(instance, pinned[k].kw1)) || (title && strcasestr(title, pinned[k].kw1)))) match = true;
+			if (pinned[k].kw2 && ((class && strcasestr(class, pinned[k].kw2)) || (instance && strcasestr(instance, pinned[k].kw2)) || (title && strcasestr(title, pinned[k].kw2)))) match = true;
+			if (match && pinned[k].toplevel == NULL && pinned[k].xsurface == NULL) {
+				match_idx = k;
+				break;
+			}
+		}
+
+		pid_t pid = xsurface->xsurface->pid;
+		bool is_focused = (dock->server->focused_toplevel == NULL && xsurface->scene_tree && xsurface->scene_tree->node.enabled);
+
+		if (match_idx >= 0) {
+			pinned[match_idx].is_running = true;
+			if (is_focused) pinned[match_idx].is_focused = true;
+			pinned[match_idx].xsurface = xsurface;
+			pinned[match_idx].pid = pid;
+		} else {
+			if (dock->dynamic_item_count < MAX_DOCK_DYNAMIC_ITEMS) {
+				struct diamonds_dock_dynamic_item *dyn = &dock->dynamic_items[dock->dynamic_item_count++];
+				dyn->toplevel = NULL;
+				dyn->xsurface = xsurface;
+				snprintf(dyn->app_id, sizeof(dyn->app_id), "%s", class ? class : (instance ? instance : ""));
+				snprintf(dyn->title, sizeof(dyn->title), "%s", title ? title : (class ? class : "Application"));
+				dyn->pid = pid;
+				dyn->is_focused = is_focused;
+				dyn->is_running = true;
+			}
+		}
+	}
+#endif
+
+	/* 4. Calculate Total Content Width & Center */
+	double item_spacing = 46.0;
+	double icon_size = 24.0;
+	int num_pinned = 5;
+	int num_dynamic = dock->dynamic_item_count;
+
+	/* Start (24) + sep1 (1) + gaps (28) = 53
+	 * Pinned items = 5 * 46
+	 * If dynamic > 0: sep_dyn (1) + gaps (28) + num_dynamic * 46 = 29 + num_dynamic * 46
+	 * Trash = sep2 (1) + gaps (28) + Trash (24) = 53
 	 */
-	double content_w = 314.0;
+	double content_w = 53.0 + (double)num_pinned * item_spacing + 53.0;
+	if (num_dynamic > 0) {
+		content_w += 29.0 + (double)num_dynamic * item_spacing;
+	}
+
 	double content_start_x = (w - content_w) / 2.0;
 	if (content_start_x < 8.0) content_start_x = 8.0;
+	dock->content_start_x = content_start_x;
 
 	/* Start Button (Diamond logo rotated 90 deg) */
 	double start_btn_cx = content_start_x + 12.0;
 	diamonds_draw_vector_diamond_logo(cr, start_btn_cx, h / 2.0, 20.0);
 
-	/* Separator after Start */
+	/* Separator 1 after Start */
 	double sep1_x = content_start_x + 28.5;
 	cairo_new_path(cr);
 	cairo_move_to(cr, sep1_x, 10.0);
@@ -314,41 +394,17 @@ void diamonds_dock_render(struct diamonds_dock *dock) {
 	cairo_set_line_width(cr, 1.0);
 	cairo_stroke(cr);
 
-	/* 4. App Icons & Indicators */
-	bool term_running = false, term_focused = false;
-	bool files_running = false, files_focused = false;
-	bool browser_running = false, browser_focused = false;
-	bool vlc_running = false, vlc_focused = false;
-	bool settings_running = false, settings_focused = false;
-
-	check_dock_app_state(dock->server, "term", "bash", &term_running, &term_focused);
-	check_dock_app_state(dock->server, "nautilus", "file", &files_running, &files_focused);
-	check_dock_app_state(dock->server, "thorium", "chromium", &browser_running, &browser_focused);
-	check_dock_app_state(dock->server, "vlc", NULL, &vlc_running, &vlc_focused);
-	check_dock_app_state(dock->server, "settings", "control", &settings_running, &settings_focused);
-
-	struct {
-		bool is_running;
-		bool is_focused;
-	} item_states[5] = {
-		{ term_running, term_focused },
-		{ files_running, files_focused },
-		{ browser_running, browser_focused },
-		{ vlc_running, vlc_focused },
-		{ settings_running, settings_focused },
-	};
-
+	/* 5. Render Pinned Apps */
 	double icons_start_x = sep1_x + 14.0;
-	double item_spacing = 46.0;
-	double icon_size = 24.0;
-	const char *app_keys[5] = { "terminal", "files", "browser", "vlc", "settings" };
+	dock->icons_start_x = icons_start_x;
 
 	for (size_t i = 0; i < 5; i++) {
 		double ix = icons_start_x + (double)i * item_spacing;
+		dock->pinned_item_x[i] = ix;
 		double cx = ix + icon_size / 2.0;
 		double cy = (h - icon_size) / 2.0 + icon_size / 2.0;
 
-		cairo_surface_t *sys_icon = diamonds_load_system_icon(app_keys[i], (int)icon_size);
+		cairo_surface_t *sys_icon = diamonds_load_system_icon(pinned[i].icon_key, (int)icon_size);
 		if (sys_icon) {
 			cairo_save(cr);
 			cairo_set_source_surface(cr, sys_icon, ix, (h - icon_size) / 2.0);
@@ -375,30 +431,80 @@ void diamonds_dock_render(struct diamonds_dock *dock) {
 			}
 		}
 
-		/* Indicators at the bottom:
-		 * Win11 style: 16x3px #38BDF8 bar when focused
-		 * macOS style: 4px circular dot #94A3B8 when running in background
-		 */
-		double indicator_cx = cx;
-		if (item_states[i].is_focused) {
+		/* Indicator: Win11 bar if focused, macOS dot if background */
+		if (pinned[i].is_focused) {
 			double bar_w = 16.0;
 			double bar_h = 3.0;
-			double bar_x = indicator_cx - bar_w / 2.0;
+			double bar_x = cx - bar_w / 2.0;
 			double bar_y = h - 5.5;
 			diamonds_draw_rounded_rect(cr, bar_x, bar_y, bar_w, bar_h, 1.5);
 			cairo_set_source_rgba(cr, 0.2196, 0.7412, 0.9725, 1.0); /* #38BDF8 */
 			cairo_fill(cr);
-		} else if (item_states[i].is_running) {
+		} else if (pinned[i].is_running) {
 			double dot_y = h - 4.5;
 			cairo_new_path(cr);
-			cairo_arc(cr, indicator_cx, dot_y, 2.0, 0.0, 2.0 * M_PI);
+			cairo_arc(cr, cx, dot_y, 2.0, 0.0, 2.0 * M_PI);
 			cairo_set_source_rgba(cr, 0.580, 0.639, 0.722, 1.0); /* #94A3B8 */
 			cairo_fill(cr);
 		}
 	}
 
-	/* 5. Separator & Trash Can Icon */
-	double sep2_x = icons_start_x + 5.0 * item_spacing - 6.0;
+	double next_x = icons_start_x + 5.0 * item_spacing - 6.0;
+
+	/* 6. Render Dynamic Unpinned Running Apps (if any) */
+	if (num_dynamic > 0) {
+		/* Vertical separator between Pinned and Dynamic */
+		double sep_dyn_x = next_x;
+		cairo_new_path(cr);
+		cairo_move_to(cr, sep_dyn_x, 10.0);
+		cairo_line_to(cr, sep_dyn_x, h - 10.0);
+		cairo_set_source_rgba(cr, 0.22, 0.22, 0.30, 0.85);
+		cairo_set_line_width(cr, 1.0);
+		cairo_stroke(cr);
+
+		double dynamic_start_x = sep_dyn_x + 14.0;
+		for (int d = 0; d < num_dynamic; d++) {
+			double ix = dynamic_start_x + (double)d * item_spacing;
+			dock->dynamic_items[d].x = ix;
+			double cx = ix + icon_size / 2.0;
+
+			cairo_surface_t *dyn_icon = diamonds_load_app_icon(
+				dock->dynamic_items[d].app_id,
+				NULL,
+				(int)icon_size);
+
+			if (dyn_icon) {
+				cairo_save(cr);
+				cairo_set_source_surface(cr, dyn_icon, ix, (h - icon_size) / 2.0);
+				cairo_paint(cr);
+				cairo_restore(cr);
+			} else {
+				draw_window_initials_icon(cr, ix, (h - icon_size) / 2.0, icon_size,
+					dock->dynamic_items[d].title[0] ? dock->dynamic_items[d].title : dock->dynamic_items[d].app_id);
+			}
+
+			/* Indicator */
+			if (dock->dynamic_items[d].is_focused) {
+				double bar_w = 16.0;
+				double bar_h = 3.0;
+				double bar_x = cx - bar_w / 2.0;
+				double bar_y = h - 5.5;
+				diamonds_draw_rounded_rect(cr, bar_x, bar_y, bar_w, bar_h, 1.5);
+				cairo_set_source_rgba(cr, 0.2196, 0.7412, 0.9725, 1.0); /* #38BDF8 */
+				cairo_fill(cr);
+			} else {
+				double dot_y = h - 4.5;
+				cairo_new_path(cr);
+				cairo_arc(cr, cx, dot_y, 2.0, 0.0, 2.0 * M_PI);
+				cairo_set_source_rgba(cr, 0.90, 0.92, 0.96, 0.85); /* Light dot */
+				cairo_fill(cr);
+			}
+		}
+		next_x = dynamic_start_x + (double)num_dynamic * item_spacing - 6.0;
+	}
+
+	/* 7. Separator & Trash Can Icon */
+	double sep2_x = next_x;
 	cairo_new_path(cr);
 	cairo_move_to(cr, sep2_x, 10.0);
 	cairo_line_to(cr, sep2_x, h - 10.0);
@@ -406,7 +512,9 @@ void diamonds_dock_render(struct diamonds_dock *dock) {
 	cairo_set_line_width(cr, 1.0);
 	cairo_stroke(cr);
 
-	double trash_x = sep2_x + 18.0;
+	double trash_x = sep2_x + 14.0;
+	dock->trash_x = trash_x;
+
 	cairo_surface_t *trash_icon = diamonds_load_system_icon("trash", (int)icon_size);
 	if (trash_icon) {
 		cairo_save(cr);
@@ -453,7 +561,6 @@ void diamonds_dock_popup_render(struct diamonds_dock *dock) {
 	cairo_stroke(cr);
 
 	/* 3. Item 1: Đóng ứng dụng (Close) */
-	/* Red close icon (✕) */
 	cairo_new_path(cr);
 	cairo_move_to(cr, 16.0, 13.0);
 	cairo_line_to(cr, 24.0, 21.0);
@@ -484,7 +591,6 @@ void diamonds_dock_popup_render(struct diamonds_dock *dock) {
 	cairo_stroke(cr);
 
 	/* 4. Item 2: Buộc dừng (Kill PID) */
-	/* Amber lightning zap icon (⚡) */
 	cairo_new_path(cr);
 	cairo_move_to(cr, 21.0, 42.0);
 	cairo_line_to(cr, 16.0, 52.0);
@@ -567,7 +673,7 @@ bool diamonds_dock_handle_click(struct diamonds_dock *dock, double lx, double ly
 	if (out_start_menu_toggled) {
 		*out_start_menu_toggled = false;
 	}
-	if (!dock) {
+	if (!dock || !dock->server) {
 		return false;
 	}
 
@@ -613,7 +719,6 @@ bool diamonds_dock_handle_click(struct diamonds_dock *dock, double lx, double ly
 				return true;
 			}
 		} else {
-			/* Clicked outside popup: dismiss it */
 			diamonds_dock_popup_hide(dock);
 		}
 	}
@@ -625,86 +730,111 @@ bool diamonds_dock_handle_click(struct diamonds_dock *dock, double lx, double ly
 	}
 
 	double rel_x = lx - dock->x;
-	double content_w = 314.0;
-	double content_start_x = (dock->width - content_w) / 2.0;
-	if (content_start_x < 8.0) content_start_x = 8.0;
+	double icon_size = 24.0;
 
-	/* Start button click [content_start_x - 6 .. content_start_x + 28] */
-	if (rel_x >= content_start_x - 6.0 && rel_x <= content_start_x + 28.0) {
+	/* Start button click */
+	if (rel_x >= dock->content_start_x - 6.0 && rel_x <= dock->content_start_x + 28.0) {
 		if (button == BTN_LEFT && out_start_menu_toggled) {
 			*out_start_menu_toggled = true;
 		}
 		return true;
 	}
 
-	/* App icon coordinates */
-	double sep1_x = content_start_x + 28.5;
-	double icons_start_x = sep1_x + 14.0;
-	double item_spacing = 46.0;
-	double icon_size = 24.0;
-
+	/* 3. Check 5 Pinned App Icons */
 	const char *app_names[] = { "Terminal", "Files", "Thorium", "VLC", "Settings" };
-	const char *kw1_list[]  = { "term", "nautilus", "thorium", "vlc", "settings" };
-	const char *kw2_list[]  = { "bash", "file", "chromium", NULL, "control" };
+	const char *kw1_list[]  = { "term", "diamonds-files", "thorium", "vlc", "diamonds-settings" };
+	const char *kw2_list[]  = { "bash", "nautilus", "chromium", NULL, "settings" };
 
 	for (size_t i = 0; i < 5; i++) {
-		double ix = icons_start_x + (double)i * item_spacing;
+		double ix = dock->pinned_item_x[i];
 		if (rel_x >= ix - 4.0 && rel_x <= ix + icon_size + 4.0) {
-			struct diamonds_toplevel *toplevel = NULL;
-			struct diamonds_xwayland_surface *xsurface = NULL;
+			/* Find running window matching this pinned slot */
+			struct diamonds_toplevel *matched_top = NULL;
+			struct diamonds_xwayland_surface *matched_xsurf = NULL;
 			pid_t pid = 0;
-			find_dock_app_window(dock->server, kw1_list[i], kw2_list[i], &toplevel, &xsurface, &pid);
+
+			/* Check Wayland */
+			struct diamonds_toplevel *top;
+			wl_list_for_each(top, &dock->server->toplevels, link) {
+				if (!top->xdg_toplevel) continue;
+				const char *app_id = top->xdg_toplevel->app_id;
+				const char *title = top->xdg_toplevel->title;
+				bool m = false;
+				if (kw1_list[i] && ((app_id && strcasestr(app_id, kw1_list[i])) || (title && strcasestr(title, kw1_list[i])))) m = true;
+				if (kw2_list[i] && ((app_id && strcasestr(app_id, kw2_list[i])) || (title && strcasestr(title, kw2_list[i])))) m = true;
+				if (m) {
+					matched_top = top;
+					struct wl_resource *res = top->xdg_toplevel->resource ?
+						top->xdg_toplevel->resource :
+						(top->xdg_toplevel->base ? top->xdg_toplevel->base->resource : NULL);
+					if (res) {
+						struct wl_client *client = wl_resource_get_client(res);
+						if (client) wl_client_get_credentials(client, &pid, NULL, NULL);
+					}
+					break;
+				}
+			}
+
+#ifdef DIAMONDS_ENABLE_XWAYLAND
+			if (!matched_top) {
+				struct diamonds_xwayland_surface *xsurf;
+				wl_list_for_each(xsurf, &dock->server->xwayland_surfaces, link) {
+					if (!xsurf->xsurface || !xsurf->xsurface->surface || xsurf->xsurface->override_redirect) continue;
+					const char *class = xsurf->xsurface->class;
+					const char *instance = xsurf->xsurface->instance;
+					const char *title = xsurf->xsurface->title;
+					bool m = false;
+					if (kw1_list[i] && ((class && strcasestr(class, kw1_list[i])) || (instance && strcasestr(instance, kw1_list[i])) || (title && strcasestr(title, kw1_list[i])))) m = true;
+					if (kw2_list[i] && ((class && strcasestr(class, kw2_list[i])) || (instance && strcasestr(instance, kw2_list[i])) || (title && strcasestr(title, kw2_list[i])))) m = true;
+					if (m) {
+						matched_xsurf = xsurf;
+						pid = xsurf->xsurface->pid;
+						break;
+					}
+				}
+			}
+#endif
 
 			if (button == BTN_RIGHT) {
-				/* RIGHT CLICK: Show Context Menu */
 				diamonds_sound_play(DIAMONDS_SOUND_CLICK);
 				int32_t pop_x = (int32_t)(dock->x + ix + icon_size / 2.0 - dock->popup.width / 2.0);
 				int32_t pop_y = (int32_t)(dock->y - dock->popup.height - 6);
 				if (pop_x < 4) pop_x = 4;
-				diamonds_dock_popup_show(dock, pop_x, pop_y, toplevel, xsurface, pid, app_names[i]);
+				diamonds_dock_popup_show(dock, pop_x, pop_y, matched_top, matched_xsurf, pid, app_names[i]);
 				return true;
 			} else if (button == BTN_LEFT) {
-				/* LEFT CLICK: Focus / Minimize / Restore or Launch */
 				diamonds_sound_play(DIAMONDS_SOUND_CLICK);
-
-				if (toplevel) {
-					bool visible = toplevel->scene_tree->node.enabled;
+				if (matched_top) {
+					bool visible = matched_top->scene_tree && matched_top->scene_tree->node.enabled;
 					if (visible) {
-						if (dock->server->focused_toplevel == toplevel) {
-							/* Currently focused -> minimize / hide */
-							wlr_scene_node_set_enabled(&toplevel->scene_tree->node, false);
-							dock->server->focused_toplevel = NULL;
+						if (dock->server->focused_toplevel == matched_top) {
+							diamonds_window_minimize(matched_top, NULL);
 						} else {
-							/* Not focused -> bring to top and focus */
-							wlr_scene_node_raise_to_top(&toplevel->scene_tree->node);
-							diamonds_focus_toplevel(dock->server, toplevel);
+							wlr_scene_node_raise_to_top(&matched_top->scene_tree->node);
+							diamonds_focus_toplevel(dock->server, matched_top);
 						}
 					} else {
-						/* Was minimized -> restore, raise to top and focus */
-						wlr_scene_node_set_enabled(&toplevel->scene_tree->node, true);
-						wlr_scene_node_raise_to_top(&toplevel->scene_tree->node);
-						diamonds_focus_toplevel(dock->server, toplevel);
+						if (matched_top->scene_tree) {
+							wlr_scene_node_set_enabled(&matched_top->scene_tree->node, true);
+							wlr_scene_node_raise_to_top(&matched_top->scene_tree->node);
+						}
+						diamonds_focus_toplevel(dock->server, matched_top);
 					}
 					diamonds_update_dock_position(dock->server);
 					return true;
 				}
 #ifdef DIAMONDS_ENABLE_XWAYLAND
-				else if (xsurface) {
-					bool visible = xsurface->scene_tree ? xsurface->scene_tree->node.enabled : false;
+				else if (matched_xsurf) {
+					bool visible = matched_xsurf->scene_tree ? matched_xsurf->scene_tree->node.enabled : false;
 					if (visible) {
-						/* Minimize */
-						if (xsurface->scene_tree) {
-							wlr_scene_node_set_enabled(&xsurface->scene_tree->node, false);
-						}
-						wlr_xwayland_surface_set_minimized(xsurface->xsurface, true);
+						diamonds_window_minimize(NULL, matched_xsurf);
 					} else {
-						/* Restore */
-						if (xsurface->scene_tree) {
-							wlr_scene_node_set_enabled(&xsurface->scene_tree->node, true);
-							wlr_scene_node_raise_to_top(&xsurface->scene_tree->node);
+						if (matched_xsurf->scene_tree) {
+							wlr_scene_node_set_enabled(&matched_xsurf->scene_tree->node, true);
+							wlr_scene_node_raise_to_top(&matched_xsurf->scene_tree->node);
 						}
-						wlr_xwayland_surface_set_minimized(xsurface->xsurface, false);
-						wlr_xwayland_surface_activate(xsurface->xsurface, true);
+						wlr_xwayland_surface_set_minimized(matched_xsurf->xsurface, false);
+						wlr_xwayland_surface_activate(matched_xsurf->xsurface, true);
 					}
 					diamonds_update_dock_position(dock->server);
 					return true;
@@ -717,16 +847,16 @@ bool diamonds_dock_handle_click(struct diamonds_dock *dock, double lx, double ly
 						launch_terminal();
 						break;
 					case 1:
-						launch_files();
+						launch_app("./build/diamonds-files || diamonds-files");
 						break;
 					case 2:
 						launch_app("thorium");
 						break;
 					case 3:
-						launch_app("vlc");
+						launch_app("vlc || ./build/diamonds-music || diamonds-music");
 						break;
 					case 4:
-						launch_app("systemsettings5 || systemsettings || gnome-control-center");
+						launch_app("./build/diamonds-settings || diamonds-settings");
 						break;
 					}
 					return true;
@@ -735,10 +865,74 @@ bool diamonds_dock_handle_click(struct diamonds_dock *dock, double lx, double ly
 		}
 	}
 
-	/* Trash icon click */
-	double sep2_x = icons_start_x + 5.0 * item_spacing - 6.0;
-	double trash_x = sep2_x + 18.0;
-	if (rel_x >= trash_x - 4.0 && rel_x <= trash_x + icon_size + 4.0) {
+	/* 4. Check Dynamic App Icons */
+	if (dock->dynamic_item_count > 0) {
+		for (int d = 0; d < dock->dynamic_item_count; d++) {
+			struct diamonds_dock_dynamic_item *item = &dock->dynamic_items[d];
+			double ix = item->x;
+			if (rel_x >= ix - 4.0 && rel_x <= ix + icon_size + 4.0) {
+				diamonds_sound_play(DIAMONDS_SOUND_CLICK);
+
+				if (button == BTN_RIGHT) {
+					int32_t pop_x = (int32_t)(dock->x + ix + icon_size / 2.0 - dock->popup.width / 2.0);
+					int32_t pop_y = (int32_t)(dock->y - dock->popup.height - 6);
+					if (pop_x < 4) pop_x = 4;
+					diamonds_dock_popup_show(dock, pop_x, pop_y,
+						item->toplevel,
+#ifdef DIAMONDS_ENABLE_XWAYLAND
+						item->xsurface,
+#else
+						NULL,
+#endif
+						item->pid,
+						item->title[0] ? item->title : item->app_id);
+					return true;
+				} else if (button == BTN_LEFT) {
+					if (item->toplevel) {
+						struct diamonds_toplevel *toplevel = item->toplevel;
+						bool visible = toplevel->scene_tree && toplevel->scene_tree->node.enabled;
+						if (visible) {
+							if (dock->server->focused_toplevel == toplevel) {
+								diamonds_window_minimize(toplevel, NULL);
+							} else {
+								wlr_scene_node_raise_to_top(&toplevel->scene_tree->node);
+								diamonds_focus_toplevel(dock->server, toplevel);
+							}
+						} else {
+							if (toplevel->scene_tree) {
+								wlr_scene_node_set_enabled(&toplevel->scene_tree->node, true);
+								wlr_scene_node_raise_to_top(&toplevel->scene_tree->node);
+							}
+							diamonds_focus_toplevel(dock->server, toplevel);
+						}
+						diamonds_update_dock_position(dock->server);
+						return true;
+					}
+#ifdef DIAMONDS_ENABLE_XWAYLAND
+					else if (item->xsurface) {
+						struct diamonds_xwayland_surface *xsurface = item->xsurface;
+						bool visible = xsurface->scene_tree ? xsurface->scene_tree->node.enabled : false;
+						if (visible) {
+							diamonds_window_minimize(NULL, xsurface);
+						} else {
+							if (xsurface->scene_tree) {
+								wlr_scene_node_set_enabled(&xsurface->scene_tree->node, true);
+								wlr_scene_node_raise_to_top(&xsurface->scene_tree->node);
+							}
+							wlr_xwayland_surface_set_minimized(xsurface->xsurface, false);
+							wlr_xwayland_surface_activate(xsurface->xsurface, true);
+						}
+						diamonds_update_dock_position(dock->server);
+						return true;
+					}
+#endif
+				}
+			}
+		}
+	}
+
+	/* 5. Trash icon click */
+	if (rel_x >= dock->trash_x - 4.0 && rel_x <= dock->trash_x + icon_size + 4.0) {
 		diamonds_sound_play(DIAMONDS_SOUND_CLICK);
 		launch_app("xdg-open trash:// || nautilus trash://");
 		return true;

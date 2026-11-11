@@ -1,6 +1,8 @@
 #define _GNU_SOURCE
 #include "startmenu.h"
 #include "diamonds.h"
+#include "dock.h"
+#include "sound.h"
 #include "icon_loader.h"
 #include "vector_icons.h"
 
@@ -28,35 +30,21 @@ static void clean_exec_cmd(char *exec) {
 	char *p = exec;
 	while (*p) {
 		if (*p == '%' && *(p + 1)) {
-			*p = ' ';
-			*(p + 1) = ' ';
-			p += 2;
-		} else {
-			p++;
+			*p = '\0';
+			break;
 		}
+		p++;
 	}
-	int len = (int)strlen(exec);
+	int len = strlen(exec);
 	while (len > 0 && isspace((unsigned char)exec[len - 1])) {
 		exec[--len] = '\0';
-	}
-	p = exec;
-	while (*p && isspace((unsigned char)*p)) p++;
-	if (p != exec) {
-		memmove(exec, p, strlen(p) + 1);
 	}
 }
 
 static void launch_desktop_cmd(const char *cmd) {
 	if (!cmd || !*cmd) return;
-	pid_t pid = fork();
-	if (pid < 0) return;
-	if (pid == 0) {
-		setsid();
-		signal(SIGPIPE, SIG_DFL);
-		char *args[] = { "/bin/sh", "-c", (char *)cmd, NULL };
-		execvp(args[0], args);
-		_exit(127);
-	}
+	diamonds_sound_play(DIAMONDS_SOUND_CLICK);
+	launch_app(cmd);
 }
 
 static int entry_cmp(const void *a, const void *b) {
@@ -66,121 +54,72 @@ static int entry_cmp(const void *a, const void *b) {
 }
 
 static void scan_desktop_directory(struct diamonds_startmenu *menu, const char *dir_path) {
-	if (!dir_path || !*dir_path) return;
 	DIR *dir = opendir(dir_path);
 	if (!dir) return;
 
 	struct dirent *ent;
+	char filepath[1024];
+
 	while ((ent = readdir(dir)) != NULL) {
 		if (menu->app_count >= MAX_STARTMENU_APPS) break;
+		if (ent->d_name[0] == '.') continue;
 
-		size_t nlen = strlen(ent->d_name);
-		if (nlen < 9 || strcmp(ent->d_name + nlen - 8, ".desktop") != 0) {
+		size_t len = strlen(ent->d_name);
+		if (len < 9 || strcmp(ent->d_name + len - 8, ".desktop") != 0) {
 			continue;
 		}
 
-		char filepath[1024];
 		snprintf(filepath, sizeof(filepath), "%s/%s", dir_path, ent->d_name);
-		FILE *f = fopen(filepath, "r");
-		if (!f) continue;
+		FILE *fp = fopen(filepath, "r");
+		if (!fp) continue;
 
-		char line[1024];
-		bool in_entry = false;
-		bool no_display = false;
-		bool is_app = true;
+		char line[512];
 		char name[96] = {0};
 		char exec[256] = {0};
 		char icon[128] = {0};
+		bool no_display = false;
+		bool in_desktop_entry = false;
 
-		while (fgets(line, sizeof(line), f)) {
-			char *p = line;
-			while (*p == ' ' || *p == '\t') p++;
+		while (fgets(line, sizeof(line), fp)) {
+			char *nl = strchr(line, '\n');
+			if (nl) *nl = '\0';
 
-			if (*p == '[') {
-				if (strncmp(p, "[Desktop Entry]", 15) == 0) {
-					in_entry = true;
+			if (line[0] == '[') {
+				if (strcmp(line, "[Desktop Entry]") == 0) {
+					in_desktop_entry = true;
 				} else {
-					in_entry = false;
+					in_desktop_entry = false;
 				}
 				continue;
 			}
-			if (!in_entry) continue;
+			if (!in_desktop_entry) continue;
 
-			if (strncmp(p, "NoDisplay=", 10) == 0) {
-				char *v = p + 10;
-				while (*v == ' ' || *v == '\t') v++;
-				if (strncasecmp(v, "true", 4) == 0 || *v == '1') {
-					no_display = true;
-				}
-				continue;
+			if (strncmp(line, "NoDisplay=true", 14) == 0 ||
+			    strncmp(line, "Hidden=true", 11) == 0) {
+				no_display = true;
+				break;
 			}
 
-			if (strncmp(p, "Hidden=", 7) == 0) {
-				char *v = p + 7;
-				while (*v == ' ' || *v == '\t') v++;
-				if (strncasecmp(v, "true", 4) == 0 || *v == '1') {
-					no_display = true;
-				}
-				continue;
-			}
-
-			if (strncmp(p, "Type=", 5) == 0) {
-				char *v = p + 5;
-				while (*v == ' ' || *v == '\t') v++;
-				if (strncasecmp(v, "Application", 11) != 0) {
-					is_app = false;
-				}
-				continue;
-			}
-
-			/* Name= (only base language, avoid Name[locale]=) */
-			if (strncmp(p, "Name=", 5) == 0 && name[0] == '\0') {
-				char *val = p + 5;
-				char *nl = strchr(val, '\n');
-				if (nl) *nl = '\0';
-				char *cr = strchr(val, '\r');
-				if (cr) *cr = '\0';
-				while (*val == ' ' || *val == '\t') val++;
-				snprintf(name, sizeof(name), "%s", val);
-				continue;
-			}
-
-			/* Exec= */
-			if (strncmp(p, "Exec=", 5) == 0 && exec[0] == '\0') {
-				char *val = p + 5;
-				char *nl = strchr(val, '\n');
-				if (nl) *nl = '\0';
-				char *cr = strchr(val, '\r');
-				if (cr) *cr = '\0';
-				clean_exec_cmd(val);
-				snprintf(exec, sizeof(exec), "%s", val);
-				continue;
-			}
-
-			/* Icon= */
-			if (strncmp(p, "Icon=", 5) == 0 && icon[0] == '\0') {
-				char *val = p + 5;
-				char *nl = strchr(val, '\n');
-				if (nl) *nl = '\0';
-				char *cr = strchr(val, '\r');
-				if (cr) *cr = '\0';
-				while (*val == ' ' || *val == '\t') val++;
-				snprintf(icon, sizeof(icon), "%s", val);
-				continue;
+			if (name[0] == '\0' && strncmp(line, "Name=", 5) == 0) {
+				snprintf(name, sizeof(name), "%.90s", line + 5);
+			} else if (exec[0] == '\0' && strncmp(line, "Exec=", 5) == 0) {
+				snprintf(exec, sizeof(exec), "%.250s", line + 5);
+				clean_exec_cmd(exec);
+			} else if (icon[0] == '\0' && strncmp(line, "Icon=", 5) == 0) {
+				snprintf(icon, sizeof(icon), "%.120s", line + 5);
 			}
 		}
-		fclose(f);
+		fclose(fp);
 
-		if (!no_display && is_app && name[0] != '\0' && exec[0] != '\0') {
-			bool dup = false;
-			for (int j = 0; j < menu->app_count; j++) {
-				if (strcasecmp(menu->apps[j].name, name) == 0 ||
-				    strcasecmp(menu->apps[j].exec, exec) == 0) {
-					dup = true;
+		if (!no_display && name[0] && exec[0]) {
+			bool exists = false;
+			for (int i = 0; i < menu->app_count; i++) {
+				if (strcasecmp(menu->apps[i].name, name) == 0) {
+					exists = true;
 					break;
 				}
 			}
-			if (!dup) {
+			if (!exists) {
 				struct diamonds_desktop_entry *entry = &menu->apps[menu->app_count++];
 				snprintf(entry->name, sizeof(entry->name), "%s", name);
 				snprintf(entry->exec, sizeof(entry->exec), "%s", exec);
@@ -192,8 +131,9 @@ static void scan_desktop_directory(struct diamonds_startmenu *menu, const char *
 }
 
 static void diamonds_startmenu_filter(struct diamonds_startmenu *menu) {
+	if (!menu) return;
 	menu->filtered_count = 0;
-	if (menu->search_query[0] == '\0') {
+	if (menu->search_len == 0 || menu->search_query[0] == '\0') {
 		for (int i = 0; i < menu->app_count && i < MAX_STARTMENU_APPS; i++) {
 			menu->filtered_indices[menu->filtered_count++] = i;
 		}
@@ -206,8 +146,8 @@ static void diamonds_startmenu_filter(struct diamonds_startmenu *menu) {
 		}
 	}
 
-	double item_height = 44.0;
-	double list_viewport_height = 368.0;
+	double item_height = 42.0;
+	double list_viewport_height = 376.0;
 	double total_h = (double)menu->filtered_count * item_height;
 	menu->max_scroll = total_h > list_viewport_height ? (total_h - list_viewport_height) : 0.0;
 	if (menu->scroll_offset > menu->max_scroll) {
@@ -221,11 +161,11 @@ static void diamonds_startmenu_filter(struct diamonds_startmenu *menu) {
 static void init_pinned_apps(struct diamonds_startmenu *menu) {
 	menu->pinned_count = 0;
 	static const char *fav_keywords[] = {
-		"terminal", "terminator", "nautilus", "files", "browser", "thorium",
-		"chrome", "firefox", "vlc", "setting", "editor", "code", "calc", NULL
+		"terminal", "terminator", "files", "diamonds-files", "nautilus",
+		"thorium", "browser", "chrome", "firefox", "vlc", "setting",
+		"diamonds-settings", "editor", "calc", NULL
 	};
 
-	/* First, match popular desktop application keywords */
 	for (int k = 0; fav_keywords[k] && menu->pinned_count < 9; k++) {
 		for (int i = 0; i < menu->app_count; i++) {
 			if (strcasestr(menu->apps[i].name, fav_keywords[k]) ||
@@ -245,7 +185,6 @@ static void init_pinned_apps(struct diamonds_startmenu *menu) {
 		}
 	}
 
-	/* Fill remaining slots with first scanned apps */
 	for (int i = 0; i < menu->app_count && menu->pinned_count < 9; i++) {
 		bool already = false;
 		for (int p = 0; p < menu->pinned_count; p++) {
@@ -263,10 +202,28 @@ static void init_pinned_apps(struct diamonds_startmenu *menu) {
 static void load_desktop_entries(struct diamonds_startmenu *menu) {
 	menu->app_count = 0;
 
-	/* 1. Scan system directory */
+	/* Built-in Diamonds ecosystem apps (always available, run from ./build or PATH).
+	 * Added first so installed .desktop duplicates with the same Name are skipped. */
+	static const struct diamonds_desktop_entry builtin_apps[] = {
+		{ .name = "Diamonds Terminal", .exec = "./build/diamonds-terminal || diamonds-terminal", .icon = "utilities-terminal" },
+		{ .name = "Diamonds Files",    .exec = "./build/diamonds-files || diamonds-files",       .icon = "system-file-manager" },
+		{ .name = "Diamonds Notes",    .exec = "./build/diamonds-notes || diamonds-notes",       .icon = "accessories-text-editor" },
+		{ .name = "Diamonds Calculator", .exec = "./build/diamonds-calc || diamonds-calc",       .icon = "accessories-calculator" },
+		{ .name = "Diamonds Photos",   .exec = "./build/diamonds-photos || diamonds-photos",     .icon = "image-viewer" },
+		{ .name = "Diamonds Music",    .exec = "./build/diamonds-music || diamonds-music",       .icon = "multimedia-audio-player" },
+		{ .name = "Diamonds Monitor",  .exec = "./build/diamonds-monitor || diamonds-monitor",   .icon = "utilities-system-monitor" },
+		{ .name = "Diamonds Mail",     .exec = "./build/diamonds-mail || diamonds-mail",         .icon = "internet-mail" },
+		{ .name = "Diamonds Clock",    .exec = "./build/diamonds-clock || diamonds-clock",       .icon = "preferences-system-time" },
+		{ .name = "Diamonds Store",    .exec = "./build/diamonds-store || diamonds-store",       .icon = "system-software-install" },
+		{ .name = "Diamonds Settings", .exec = "./build/diamonds-settings || diamonds-settings", .icon = "preferences-system" },
+	};
+	for (size_t i = 0; i < sizeof(builtin_apps) / sizeof(builtin_apps[0]) &&
+			menu->app_count < MAX_STARTMENU_APPS; i++) {
+		menu->apps[menu->app_count++] = builtin_apps[i];
+	}
+
 	scan_desktop_directory(menu, "/usr/share/applications");
 
-	/* 2. Scan user local directory */
 	const char *home = getenv("HOME");
 	if (home && *home) {
 		char user_apps_path[1024];
@@ -274,14 +231,13 @@ static void load_desktop_entries(struct diamonds_startmenu *menu) {
 		scan_desktop_directory(menu, user_apps_path);
 	}
 
-	/* 3. Fallback defaults if scanned list is empty */
 	if (menu->app_count == 0) {
 		struct diamonds_desktop_entry defaults[] = {
 			{ .name = "Terminal",        .exec = "terminator", .icon = "utilities-terminal" },
-			{ .name = "Files",           .exec = "nautilus",   .icon = "system-file-manager" },
+			{ .name = "Files",           .exec = "./build/diamonds-files || diamonds-files",   .icon = "system-file-manager" },
 			{ .name = "Thorium Browser", .exec = "thorium",    .icon = "thorium-browser" },
 			{ .name = "VLC Media",       .exec = "vlc",        .icon = "vlc" },
-			{ .name = "Settings",        .exec = "systemsettings5 || gnome-control-center", .icon = "preferences-system" },
+			{ .name = "Settings",        .exec = "./build/diamonds-settings || diamonds-settings", .icon = "preferences-system" },
 			{ .name = "Calculator",      .exec = "gnome-calculator || galculator", .icon = "accessories-calculator" },
 		};
 		for (size_t i = 0; i < sizeof(defaults) / sizeof(defaults[0]); i++) {
@@ -289,16 +245,15 @@ static void load_desktop_entries(struct diamonds_startmenu *menu) {
 		}
 	}
 
-	/* 4. Sort all applications alphabetically A-Z */
 	qsort(menu->apps, menu->app_count, sizeof(menu->apps[0]), entry_cmp);
-
-	/* 5. Initialize pinned apps */
 	init_pinned_apps(menu);
 
-	/* 6. Populate filtered indices */
 	menu->search_query[0] = '\0';
-	menu->search_query_len = 0;
+	menu->search_len = 0;
 	menu->scroll_offset = 0.0;
+	menu->hover_app_idx = -1;
+	menu->hover_pinned_idx = -1;
+	menu->hover_power_btn = 0;
 	diamonds_startmenu_filter(menu);
 }
 
@@ -307,14 +262,16 @@ struct diamonds_startmenu *diamonds_startmenu_create(struct diamonds_server *ser
 	if (!menu) return NULL;
 
 	menu->server = server;
-	menu->width = 640;
+	menu->width = 660;
 	menu->height = 540;
 	menu->visible = false;
+	menu->hover_app_idx = -1;
+	menu->hover_pinned_idx = -1;
+	menu->hover_power_btn = 0;
 
-	/* Get user name */
 	struct passwd *pw = getpwuid(getuid());
 	const char *u = pw ? pw->pw_name : getenv("USER");
-	snprintf(menu->username, sizeof(menu->username), "%s", (u && *u) ? u : "Diamonds User");
+	snprintf(menu->username, sizeof(menu->username), "%s", (u && *u) ? u : "user");
 
 	load_desktop_entries(menu);
 
@@ -350,8 +307,12 @@ void diamonds_startmenu_destroy(struct diamonds_startmenu *menu) {
 void diamonds_startmenu_reposition(struct diamonds_startmenu *menu, int32_t dock_x, int32_t dock_y) {
 	if (!menu || !menu->scene_buffer) return;
 
-	menu->x = dock_x + 8;
-	menu->y = dock_y - menu->height - 12;
+	if (menu->server && menu->server->dock && menu->server->dock->is_full_width) {
+		menu->x = (menu->server->dock->width - menu->width) / 2;
+	} else {
+		menu->x = dock_x + 8;
+	}
+	menu->y = dock_y - menu->height - 8;
 	if (menu->x < 12) menu->x = 12;
 	if (menu->y < 36) menu->y = 36;
 
@@ -364,6 +325,9 @@ void diamonds_startmenu_set_visible(struct diamonds_startmenu *menu, bool visibl
 	wlr_scene_node_set_enabled(&menu->scene_buffer->node, visible);
 	if (visible) {
 		wlr_scene_node_raise_to_top(&menu->scene_buffer->node);
+		menu->hover_app_idx = -1;
+		menu->hover_pinned_idx = -1;
+		menu->hover_power_btn = 0;
 		diamonds_startmenu_render(menu);
 	}
 }
@@ -421,25 +385,25 @@ void diamonds_startmenu_render(struct diamonds_startmenu *menu) {
 	cairo_paint(cr);
 	cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
 
-	/* 2. Main Mica Card: #131422 (alpha 0.96) with 14px rounded corners */
-	diamonds_draw_rounded_rect(cr, 0.5, 0.5, w - 1.0, h - 1.0, 14.0);
-	cairo_set_source_rgba(cr, 0.075, 0.078, 0.133, 0.96);
+	/* 2. Main Mica Card: #14141B with alpha = 0.96 */
+	diamonds_draw_rounded_rect(cr, 0.5, 0.5, w - 1.0, h - 1.0, 12.0);
+	cairo_set_source_rgba(cr, 0.078, 0.078, 0.106, 0.96);
 	cairo_fill_preserve(cr);
 
-	/* Mica Glass Border #32354a */
-	cairo_set_source_rgba(cr, 0.22, 0.74, 0.97, 0.25);
+	/* Mica Glass Border #2B2D3C */
+	cairo_set_source_rgba(cr, 0.17, 0.18, 0.24, 0.90);
 	cairo_set_line_width(cr, 1.0);
 	cairo_stroke(cr);
 
-	/* 3. Top Search Bar: x:16, y:14, w:608, h:38 */
-	diamonds_draw_rounded_rect(cr, 16.0, 14.0, w - 32.0, 38.0, 10.0);
-	cairo_set_source_rgba(cr, 0.11, 0.11, 0.17, 0.92);
+	/* 3. Top Search Bar: x:18, y:14, w: w - 36, h:38 */
+	diamonds_draw_rounded_rect(cr, 18.0, 14.0, w - 36.0, 38.0, 8.0);
+	cairo_set_source_rgba(cr, 0.11, 0.11, 0.16, 0.90);
 	cairo_fill_preserve(cr);
 
-	if (menu->search_query_len > 0) {
-		cairo_set_source_rgba(cr, 0.22, 0.74, 0.97, 0.65); /* Focused glow */
+	if (menu->search_len > 0) {
+		cairo_set_source_rgba(cr, 0.22, 0.74, 0.97, 0.85); /* Active blue glow */
 	} else {
-		cairo_set_source_rgba(cr, 0.20, 0.21, 0.31, 0.60);
+		cairo_set_source_rgba(cr, 0.20, 0.21, 0.30, 0.60);
 	}
 	cairo_set_line_width(cr, 1.0);
 	cairo_stroke(cr);
@@ -447,10 +411,10 @@ void diamonds_startmenu_render(struct diamonds_startmenu *menu) {
 	/* Search Magnifier Vector */
 	cairo_set_source_rgba(cr, 0.55, 0.58, 0.72, 0.95);
 	cairo_set_line_width(cr, 1.5);
-	cairo_arc(cr, 32.0, 33.0, 5.0, 0.0, 2.0 * M_PI);
+	cairo_arc(cr, 34.0, 33.0, 5.0, 0.0, 2.0 * M_PI);
 	cairo_stroke(cr);
-	cairo_move_to(cr, 35.8, 36.8);
-	cairo_line_to(cr, 40.5, 41.5);
+	cairo_move_to(cr, 37.8, 36.8);
+	cairo_line_to(cr, 42.5, 41.5);
 	cairo_stroke(cr);
 
 	/* Search Text or Placeholder */
@@ -460,44 +424,42 @@ void diamonds_startmenu_render(struct diamonds_startmenu *menu) {
 		pango_layout_set_font_description(layout, desc);
 		pango_font_description_free(desc);
 
-		if (menu->search_query_len > 0) {
+		if (menu->search_len > 0) {
 			pango_layout_set_text(layout, menu->search_query, -1);
-			cairo_move_to(cr, 48.0, 24.0);
-			cairo_set_source_rgba(cr, 0.95, 0.96, 0.98, 1.0);
+			cairo_move_to(cr, 52.0, 24.0);
+			cairo_set_source_rgba(cr, 0.96, 0.97, 0.99, 1.0);
 			pango_cairo_show_layout(cr, layout);
 
-			/* Cursor */
+			/* Blinking / Visible Cursor '|' at end of text */
 			int tw, th;
 			pango_layout_get_pixel_size(layout, &tw, &th);
-			cairo_set_source_rgba(cr, 0.22, 0.74, 0.97, 0.9);
-			cairo_rectangle(cr, 50.0 + tw, 23.0, 1.5, 18.0);
+			cairo_set_source_rgba(cr, 0.22, 0.74, 0.97, 1.0);
+			cairo_rectangle(cr, 54.0 + tw, 23.0, 1.5, 18.0);
 			cairo_fill(cr);
 
 			/* Clear Button (✕) on the right */
-			cairo_set_source_rgba(cr, 0.60, 0.64, 0.76, 0.85);
+			cairo_set_source_rgba(cr, 0.60, 0.64, 0.76, 0.90);
 			cairo_set_line_width(cr, 1.4);
-			cairo_move_to(cr, w - 38.0, 28.0);
-			cairo_line_to(cr, w - 28.0, 38.0);
-			cairo_move_to(cr, w - 28.0, 28.0);
-			cairo_line_to(cr, w - 38.0, 38.0);
+			cairo_move_to(cr, w - 40.0, 27.0);
+			cairo_line_to(cr, w - 28.0, 39.0);
+			cairo_move_to(cr, w - 28.0, 27.0);
+			cairo_line_to(cr, w - 40.0, 39.0);
 			cairo_stroke(cr);
 		} else {
 			pango_layout_set_text(layout, "Type here to search apps, commands...", -1);
-			cairo_move_to(cr, 48.0, 24.0);
-			cairo_set_source_rgba(cr, 0.45, 0.48, 0.60, 0.85);
+			cairo_move_to(cr, 52.0, 24.0);
+			cairo_set_source_rgba(cr, 0.45, 0.48, 0.58, 0.85);
 			pango_cairo_show_layout(cr, layout);
+
+			/* Initial cursor */
+			cairo_set_source_rgba(cr, 0.22, 0.74, 0.97, 0.8);
+			cairo_rectangle(cr, 52.0, 23.0, 1.5, 18.0);
+			cairo_fill(cr);
 		}
 		g_object_unref(layout);
 	}
 
-	/* 4. LEFT COLUMN: All Applications List (x:16, y:60, w:336, h:412) */
-	diamonds_draw_rounded_rect(cr, 16.0, 60.0, 336.0, 412.0, 10.0);
-	cairo_set_source_rgba(cr, 0.095, 0.10, 0.15, 0.70);
-	cairo_fill_preserve(cr);
-	cairo_set_source_rgba(cr, 0.18, 0.19, 0.28, 0.50);
-	cairo_set_line_width(cr, 0.8);
-	cairo_stroke(cr);
-
+	/* 4. LEFT COLUMN: All Applications List (x:18, y:60, w:320, h:412) */
 	/* Left Header */
 	layout = pango_cairo_create_layout(cr);
 	if (layout) {
@@ -506,25 +468,25 @@ void diamonds_startmenu_render(struct diamonds_startmenu *menu) {
 		pango_font_description_free(desc);
 
 		char ltitle[64];
-		if (menu->search_query_len > 0) {
+		if (menu->search_len > 0) {
 			snprintf(ltitle, sizeof(ltitle), "SEARCH RESULTS (%d)", menu->filtered_count);
 		} else {
 			snprintf(ltitle, sizeof(ltitle), "ALL APPLICATIONS (A-Z • %d)", menu->filtered_count);
 		}
 		pango_layout_set_text(layout, ltitle, -1);
-		cairo_move_to(cr, 28.0, 70.0);
-		cairo_set_source_rgba(cr, 0.82, 0.85, 0.94, 0.95);
+		cairo_move_to(cr, 26.0, 70.0);
+		cairo_set_source_rgba(cr, 0.78, 0.82, 0.92, 0.95);
 		pango_cairo_show_layout(cr, layout);
 		g_object_unref(layout);
 	}
 
-	/* Left List Viewport: y:92 to 464 (height: 372) */
+	/* Left List Viewport with strict cairo_rectangle + cairo_clip */
 	cairo_save(cr);
-	diamonds_draw_rounded_rect(cr, 18.0, 92.0, 332.0, 372.0, 8.0);
+	cairo_rectangle(cr, 18.0, 92.0, 320.0, 376.0);
 	cairo_clip(cr);
 
 	double list_y_start = 94.0;
-	double row_h = 44.0;
+	double row_h = 42.0;
 	int start_idx = (int)(menu->scroll_offset / row_h);
 	if (start_idx < 0) start_idx = 0;
 	int end_idx = start_idx + 10;
@@ -534,16 +496,15 @@ void diamonds_startmenu_render(struct diamonds_startmenu *menu) {
 		int app_idx = menu->filtered_indices[i];
 		double row_y = list_y_start + (double)i * row_h - menu->scroll_offset;
 
-		/* Row card */
-		diamonds_draw_rounded_rect(cr, 22.0, row_y, 322.0, 38.0, 8.0);
-		cairo_set_source_rgba(cr, 0.13, 0.14, 0.20, 0.50);
-		cairo_fill_preserve(cr);
-		cairo_set_source_rgba(cr, 0.20, 0.22, 0.32, 0.30);
-		cairo_set_line_width(cr, 0.6);
-		cairo_stroke(cr);
+		/* Transparent by default! Only draw rounded rect on hover! */
+		if (menu->hover_app_idx == i) {
+			diamonds_draw_rounded_rect(cr, 20.0, row_y, 314.0, 38.0, 6.0);
+			cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.08);
+			cairo_fill(cr);
+		}
 
-		/* App icon */
-		draw_icon_or_vector(cr, menu->apps[app_idx].icon, menu->apps[app_idx].name, 28.0, row_y + 5.0, 28);
+		/* App icon 28x28 */
+		draw_icon_or_vector(cr, menu->apps[app_idx].icon, menu->apps[app_idx].name, 26.0, row_y + 5.0, 28);
 
 		/* App Name */
 		layout = pango_cairo_create_layout(cr);
@@ -552,11 +513,11 @@ void diamonds_startmenu_render(struct diamonds_startmenu *menu) {
 			pango_layout_set_font_description(layout, desc);
 			pango_font_description_free(desc);
 			pango_layout_set_text(layout, menu->apps[app_idx].name, -1);
-			pango_layout_set_width(layout, 250 * PANGO_SCALE);
+			pango_layout_set_width(layout, 246 * PANGO_SCALE);
 			pango_layout_set_ellipsize(layout, PANGO_ELLIPSIZE_END);
 
-			cairo_move_to(cr, 64.0, row_y + 10.0);
-			cairo_set_source_rgba(cr, 0.92, 0.94, 0.98, 1.0);
+			cairo_move_to(cr, 62.0, row_y + 10.0);
+			cairo_set_source_rgba(cr, 0.94, 0.96, 0.99, 1.0);
 			pango_cairo_show_layout(cr, layout);
 			g_object_unref(layout);
 		}
@@ -566,27 +527,26 @@ void diamonds_startmenu_render(struct diamonds_startmenu *menu) {
 	/* Scrollbar if needed */
 	if (menu->max_scroll > 0.0) {
 		double track_h = 360.0;
-		double thumb_ratio = 372.0 / ((double)menu->filtered_count * row_h);
+		double thumb_ratio = 376.0 / ((double)menu->filtered_count * row_h);
 		if (thumb_ratio > 1.0) thumb_ratio = 1.0;
 		double thumb_h = track_h * thumb_ratio;
 		if (thumb_h < 24.0) thumb_h = 24.0;
 		double scroll_ratio = menu->scroll_offset / menu->max_scroll;
 		double thumb_y = 96.0 + (track_h - thumb_h) * scroll_ratio;
 
-		/* Scrollbar thumb */
-		diamonds_draw_rounded_rect(cr, 346.0, thumb_y, 3.5, thumb_h, 2.0);
-		cairo_set_source_rgba(cr, 0.35, 0.38, 0.52, 0.8);
+		diamonds_draw_rounded_rect(cr, 336.0, thumb_y, 3.0, thumb_h, 1.5);
+		cairo_set_source_rgba(cr, 0.35, 0.38, 0.50, 0.7);
 		cairo_fill(cr);
 	}
 
-	/* 5. RIGHT COLUMN: Pinned Grid (x:362, y:60, w:262, h:412) */
-	diamonds_draw_rounded_rect(cr, 362.0, 60.0, 262.0, 412.0, 10.0);
-	cairo_set_source_rgba(cr, 0.095, 0.10, 0.15, 0.70);
-	cairo_fill_preserve(cr);
-	cairo_set_source_rgba(cr, 0.18, 0.19, 0.28, 0.50);
-	cairo_set_line_width(cr, 0.8);
+	/* Vertical subtle divider between columns */
+	cairo_move_to(cr, 344.0, 66.0);
+	cairo_line_to(cr, 344.0, 466.0);
+	cairo_set_source_rgba(cr, 0.20, 0.21, 0.28, 0.6);
+	cairo_set_line_width(cr, 1.0);
 	cairo_stroke(cr);
 
+	/* 5. RIGHT COLUMN: Pinned Grid (x:348, y:60, w:294, h:412) */
 	/* Right Header */
 	layout = pango_cairo_create_layout(cr);
 	if (layout) {
@@ -594,48 +554,48 @@ void diamonds_startmenu_render(struct diamonds_startmenu *menu) {
 		pango_layout_set_font_description(layout, desc);
 		pango_font_description_free(desc);
 		pango_layout_set_text(layout, "PINNED APPS", -1);
-		cairo_move_to(cr, 374.0, 70.0);
+		cairo_move_to(cr, 354.0, 70.0);
 		cairo_set_source_rgba(cr, 0.22, 0.74, 0.97, 1.0);
 		pango_cairo_show_layout(cr, layout);
 		g_object_unref(layout);
 	}
 
-	/* 3x3 Pinned Grid: col_w: 78, row_h: 94, gap_x: 6, gap_y: 10 */
-	double grid_x = 372.0;
-	double grid_y = 96.0;
+	/* 3x3 Pinned Grid: col_w: 92, row_h: 96 */
 	int display_pinned = menu->pinned_count < 9 ? menu->pinned_count : 9;
 
 	for (int i = 0; i < display_pinned; i++) {
 		int app_idx = menu->pinned_indices[i];
 		int col = i % 3;
 		int row = i / 3;
-		double item_x = grid_x + (double)col * 80.0;
-		double item_y = grid_y + (double)row * 102.0;
+		double item_x = 350.0 + (double)col * 96.0;
+		double item_y = 96.0 + (double)row * 104.0;
+		double item_w = 90.0;
+		double item_h = 96.0;
 
-		/* Card background */
-		diamonds_draw_rounded_rect(cr, item_x, item_y, 76.0, 92.0, 9.0);
-		cairo_set_source_rgba(cr, 0.13, 0.14, 0.20, 0.75);
-		cairo_fill_preserve(cr);
-		cairo_set_source_rgba(cr, 0.22, 0.24, 0.35, 0.40);
-		cairo_set_line_width(cr, 0.7);
-		cairo_stroke(cr);
+		/* Only show subtle background on hover! NO permanent boxes or borders! */
+		if (menu->hover_pinned_idx == i) {
+			diamonds_draw_rounded_rect(cr, item_x, item_y, item_w, item_h, 8.0);
+			cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.08);
+			cairo_fill(cr);
+		}
 
-		/* Icon 36x36 centered */
-		draw_icon_or_vector(cr, menu->apps[app_idx].icon, menu->apps[app_idx].name, item_x + 20.0, item_y + 12.0, 36);
+		/* Icon 40x40 centered horizontally */
+		draw_icon_or_vector(cr, menu->apps[app_idx].icon, menu->apps[app_idx].name,
+			item_x + (item_w - 40.0) / 2.0, item_y + 8.0, 40);
 
-		/* Title */
+		/* Title centered below icon */
 		layout = pango_cairo_create_layout(cr);
 		if (layout) {
-			PangoFontDescription *desc = pango_font_description_from_string(FONT_BASE " 8");
+			PangoFontDescription *desc = pango_font_description_from_string(FONT_BASE " 8.5");
 			pango_layout_set_font_description(layout, desc);
 			pango_font_description_free(desc);
 			pango_layout_set_text(layout, menu->apps[app_idx].name, -1);
-			pango_layout_set_width(layout, 72 * PANGO_SCALE);
+			pango_layout_set_width(layout, (int)((item_w - 4.0) * PANGO_SCALE));
 			pango_layout_set_alignment(layout, PANGO_ALIGN_CENTER);
 			pango_layout_set_ellipsize(layout, PANGO_ELLIPSIZE_END);
 
-			cairo_move_to(cr, item_x + 2.0, item_y + 56.0);
-			cairo_set_source_rgba(cr, 0.90, 0.92, 0.96, 1.0);
+			cairo_move_to(cr, item_x + 2.0, item_y + 54.0);
+			cairo_set_source_rgba(cr, 0.90, 0.93, 0.97, 1.0);
 			pango_cairo_show_layout(cr, layout);
 			g_object_unref(layout);
 		}
@@ -644,103 +604,170 @@ void diamonds_startmenu_render(struct diamonds_startmenu *menu) {
 	/* 6. BOTTOM FOOTER: User info and 3 real Power buttons (y: 480 to 540) */
 	cairo_move_to(cr, 0, 480.0);
 	cairo_line_to(cr, w, 480.0);
-	cairo_set_source_rgba(cr, 0.20, 0.21, 0.30, 0.7);
+	cairo_set_source_rgba(cr, 0.20, 0.21, 0.28, 0.7);
 	cairo_set_line_width(cr, 1.0);
 	cairo_stroke(cr);
 
 	/* User Avatar Silhouette Vector */
-	diamonds_draw_vector_avatar(cr, 34.0, 510.0, 15.0);
+	diamonds_draw_vector_avatar(cr, 36.0, 510.0, 15.0);
 
-	/* User Name */
+	/* Real User Name from getpwuid */
 	layout = pango_cairo_create_layout(cr);
 	if (layout) {
-		PangoFontDescription *desc = pango_font_description_from_string(FONT_BASE " Bold 10");
+		PangoFontDescription *desc = pango_font_description_from_string(FONT_BASE " Bold 10.5");
 		pango_layout_set_font_description(layout, desc);
 		pango_font_description_free(desc);
 		pango_layout_set_text(layout, menu->username, -1);
-		cairo_move_to(cr, 58.0, 497.0);
+		int text_w = 0, text_h = 0;
+		pango_layout_get_pixel_size(layout, &text_w, &text_h);
+		cairo_move_to(cr, 60.0, 510.0 - text_h / 2.0);
 		cairo_set_source_rgba(cr, 0.94, 0.96, 0.99, 1.0);
-		pango_cairo_show_layout(cr, layout);
-
-		desc = pango_font_description_from_string(FONT_BASE " 7.5");
-		pango_layout_set_font_description(layout, desc);
-		pango_font_description_free(desc);
-		pango_layout_set_text(layout, "Standard User • Diamonds Shell", -1);
-		cairo_move_to(cr, 58.0, 515.0);
-		cairo_set_source_rgba(cr, 0.50, 0.54, 0.66, 1.0);
 		pango_cairo_show_layout(cr, layout);
 		g_object_unref(layout);
 	}
 
-	/* 3 Real Power Buttons at Bottom Right:
-	 * Button 1: Lock (x: 456, y: 494, w: 50, h: 32)
-	 * Button 2: Reboot (x: 514, y: 494, w: 52, h: 32)
-	 * Button 3: Shutdown (x: 574, y: 494, w: 50, h: 32)
+	/* 3 Circular Power Buttons 32x32px (radius 16px):
+	 * Button 1: Lock (cx = 542.0, cy = 510.0)
+	 * Button 2: Reboot (cx = 584.0, cy = 510.0)
+	 * Button 3: Shutdown (cx = 626.0, cy = 510.0)
 	 */
+
 	/* 1. Lock */
-	diamonds_draw_rounded_rect(cr, 456.0, 494.0, 50.0, 32.0, 8.0);
-	cairo_set_source_rgba(cr, 0.14, 0.16, 0.24, 0.85);
+	cairo_arc(cr, 542.0, 510.0, 16.0, 0.0, 2.0 * M_PI);
+	if (menu->hover_power_btn == 1) {
+		cairo_set_source_rgba(cr, 0.22, 0.74, 0.97, 0.35);
+	} else {
+		cairo_set_source_rgba(cr, 0.16, 0.18, 0.26, 0.85);
+	}
 	cairo_fill_preserve(cr);
-	cairo_set_source_rgba(cr, 0.24, 0.26, 0.38, 0.60);
-	cairo_set_line_width(cr, 0.8);
+	cairo_set_source_rgba(cr, 0.28, 0.30, 0.42, 0.60);
+	cairo_set_line_width(cr, 1.0);
 	cairo_stroke(cr);
 
-	/* Lock vector icon (cx = 481, cy = 510) */
-	cairo_set_source_rgba(cr, 0.75, 0.80, 0.92, 1.0);
+	/* Lock vector icon */
+	cairo_set_source_rgba(cr, 0.85, 0.88, 0.96, 1.0);
 	cairo_set_line_width(cr, 1.4);
-	cairo_arc(cr, 481.0, 506.0, 4.0, -M_PI, 0.0);
+	cairo_arc(cr, 542.0, 506.0, 4.0, -M_PI, 0.0);
 	cairo_stroke(cr);
-	diamonds_draw_rounded_rect(cr, 476.0, 506.0, 10.0, 8.0, 2.0);
+	diamonds_draw_rounded_rect(cr, 537.0, 506.0, 10.0, 8.0, 2.0);
 	cairo_fill(cr);
 
 	/* 2. Reboot */
-	diamonds_draw_rounded_rect(cr, 514.0, 494.0, 52.0, 32.0, 8.0);
-	cairo_set_source_rgba(cr, 0.18, 0.16, 0.22, 0.85);
+	cairo_arc(cr, 584.0, 510.0, 16.0, 0.0, 2.0 * M_PI);
+	if (menu->hover_power_btn == 2) {
+		cairo_set_source_rgba(cr, 0.96, 0.76, 0.36, 0.40);
+	} else {
+		cairo_set_source_rgba(cr, 0.20, 0.18, 0.24, 0.85);
+	}
 	cairo_fill_preserve(cr);
-	cairo_set_source_rgba(cr, 0.32, 0.28, 0.38, 0.60);
-	cairo_set_line_width(cr, 0.8);
+	cairo_set_source_rgba(cr, 0.36, 0.30, 0.42, 0.60);
+	cairo_set_line_width(cr, 1.0);
 	cairo_stroke(cr);
 
-	/* Reboot circular arrow icon (cx = 540, cy = 510) */
-	cairo_set_source_rgba(cr, 0.96, 0.76, 0.36, 1.0); /* Amber */
+	/* Reboot circular arrow icon */
+	cairo_set_source_rgba(cr, 0.96, 0.76, 0.36, 1.0);
 	cairo_set_line_width(cr, 1.5);
-	cairo_arc(cr, 540.0, 510.0, 5.5, -0.4 * M_PI, 1.3 * M_PI);
+	cairo_arc(cr, 584.0, 510.0, 5.5, -0.4 * M_PI, 1.3 * M_PI);
 	cairo_stroke(cr);
-	cairo_move_to(cr, 537.0, 504.0);
-	cairo_line_to(cr, 541.0, 504.0);
-	cairo_line_to(cr, 541.0, 508.0);
+	cairo_move_to(cr, 581.0, 504.0);
+	cairo_line_to(cr, 585.0, 504.0);
+	cairo_line_to(cr, 585.0, 508.0);
 	cairo_stroke(cr);
 
 	/* 3. Shutdown */
-	diamonds_draw_rounded_rect(cr, 574.0, 494.0, 50.0, 32.0, 8.0);
-	cairo_set_source_rgba(cr, 0.25, 0.12, 0.15, 0.85);
+	cairo_arc(cr, 626.0, 510.0, 16.0, 0.0, 2.0 * M_PI);
+	if (menu->hover_power_btn == 3) {
+		cairo_set_source_rgba(cr, 0.94, 0.27, 0.27, 0.45);
+	} else {
+		cairo_set_source_rgba(cr, 0.26, 0.14, 0.18, 0.85);
+	}
 	cairo_fill_preserve(cr);
-	cairo_set_source_rgba(cr, 0.45, 0.20, 0.25, 0.60);
-	cairo_set_line_width(cr, 0.8);
+	cairo_set_source_rgba(cr, 0.48, 0.22, 0.28, 0.60);
+	cairo_set_line_width(cr, 1.0);
 	cairo_stroke(cr);
 
-	/* Power icon (cx = 599, cy = 510) */
-	cairo_set_source_rgba(cr, 0.95, 0.35, 0.35, 1.0); /* Red */
+	/* Shutdown power symbol */
+	cairo_set_source_rgba(cr, 0.96, 0.45, 0.45, 1.0);
 	cairo_set_line_width(cr, 1.5);
-	cairo_arc(cr, 599.0, 510.0, 6.0, -0.6 * M_PI, 1.6 * M_PI);
+	cairo_arc(cr, 626.0, 510.5, 5.5, -0.35 * M_PI, 1.35 * M_PI);
 	cairo_stroke(cr);
-	cairo_move_to(cr, 599.0, 504.0);
-	cairo_line_to(cr, 599.0, 509.0);
+	cairo_move_to(cr, 626.0, 504.0);
+	cairo_line_to(cr, 626.0, 510.0);
 	cairo_stroke(cr);
 
 	cairo_destroy(cr);
 
-	/* Damage buffer */
 	pixman_region32_t damage;
 	pixman_region32_init_rect(&damage, 0, 0, (uint32_t)menu->width, (uint32_t)menu->height);
 	wlr_scene_buffer_set_buffer_with_damage(menu->scene_buffer, &menu->buffer->base, &damage);
 	pixman_region32_fini(&damage);
 }
 
+bool diamonds_startmenu_handle_motion(struct diamonds_startmenu *menu, double lx, double ly) {
+	if (!menu || !menu->visible) return false;
+
+	if (lx < menu->x || lx > menu->x + menu->width ||
+	    ly < menu->y || ly > menu->y + menu->height) {
+		if (menu->hover_app_idx != -1 || menu->hover_pinned_idx != -1 || menu->hover_power_btn != 0) {
+			menu->hover_app_idx = -1;
+			menu->hover_pinned_idx = -1;
+			menu->hover_power_btn = 0;
+			diamonds_startmenu_render(menu);
+		}
+		return false;
+	}
+
+	double rel_x = lx - menu->x;
+	double rel_y = ly - menu->y;
+
+	int old_app = menu->hover_app_idx;
+	int old_pin = menu->hover_pinned_idx;
+	int old_pwr = menu->hover_power_btn;
+
+	menu->hover_app_idx = -1;
+	menu->hover_pinned_idx = -1;
+	menu->hover_power_btn = 0;
+
+	/* 1. Left List (y: 92 to 468, x: 18 to 336) */
+	if (rel_x >= 18.0 && rel_x <= 336.0 && rel_y >= 92.0 && rel_y <= 468.0) {
+		double list_rel_y = (rel_y - 94.0) + menu->scroll_offset;
+		int row_idx = (int)(list_rel_y / 42.0);
+		if (row_idx >= 0 && row_idx < menu->filtered_count) {
+			menu->hover_app_idx = row_idx;
+		}
+	}
+	/* 2. Right Pinned Grid (y: 96 to 408, x: 348 to 642) */
+	else if (rel_x >= 348.0 && rel_x <= 642.0 && rel_y >= 96.0 && rel_y <= 408.0) {
+		int col = (int)((rel_x - 350.0) / 96.0);
+		int row = (int)((rel_y - 96.0) / 104.0);
+		if (col >= 0 && col < 3 && row >= 0 && row < 3) {
+			int p = row * 3 + col;
+			if (p < menu->pinned_count) {
+				menu->hover_pinned_idx = p;
+			}
+		}
+	}
+	/* 3. Power buttons (y: 494 to 526) */
+	else if (rel_y >= 494.0 && rel_y <= 526.0) {
+		double d_lock = hypot(rel_x - 542.0, rel_y - 510.0);
+		double d_reb  = hypot(rel_x - 584.0, rel_y - 510.0);
+		double d_shut = hypot(rel_x - 626.0, rel_y - 510.0);
+		if (d_lock <= 16.0) menu->hover_power_btn = 1;
+		else if (d_reb <= 16.0) menu->hover_power_btn = 2;
+		else if (d_shut <= 16.0) menu->hover_power_btn = 3;
+	}
+
+	if (menu->hover_app_idx != old_app ||
+	    menu->hover_pinned_idx != old_pin ||
+	    menu->hover_power_btn != old_pwr) {
+		diamonds_startmenu_render(menu);
+	}
+	return true;
+}
+
 bool diamonds_startmenu_handle_click(struct diamonds_startmenu *menu, double lx, double ly) {
 	if (!menu || !menu->visible) return false;
 
-	/* If clicked outside startmenu bounds, dismiss menu */
 	if (lx < menu->x || lx > menu->x + menu->width ||
 	    ly < menu->y || ly > menu->y + menu->height) {
 		diamonds_startmenu_set_visible(menu, false);
@@ -751,42 +778,42 @@ bool diamonds_startmenu_handle_click(struct diamonds_startmenu *menu, double lx,
 	double rel_y = ly - menu->y;
 
 	/* 1. Check Search Bar Clear Button (✕) */
-	if (menu->search_query_len > 0 &&
+	if (menu->search_len > 0 &&
 	    rel_x >= (double)menu->width - 44.0 && rel_x <= (double)menu->width - 24.0 &&
 	    rel_y >= 20.0 && rel_y <= 46.0) {
 		menu->search_query[0] = '\0';
-		menu->search_query_len = 0;
+		menu->search_len = 0;
 		diamonds_startmenu_filter(menu);
 		diamonds_startmenu_render(menu);
 		return true;
 	}
 
-	/* 2. Check 3 Power Buttons */
-	/* Lock */
-	if (rel_x >= 456.0 && rel_x <= 506.0 && rel_y >= 494.0 && rel_y <= 526.0) {
+	/* 2. Check 3 Circular Power Buttons */
+	/* Lock (cx = 542.0, cy = 510.0, r = 16.0) */
+	if (hypot(rel_x - 542.0, rel_y - 510.0) <= 18.0) {
 		diamonds_startmenu_set_visible(menu, false);
 		launch_desktop_cmd("swaylock -f -c 000000 || loginctl lock-session || dm-tool lock &");
 		return true;
 	}
 
-	/* Reboot */
-	if (rel_x >= 514.0 && rel_x <= 566.0 && rel_y >= 494.0 && rel_y <= 526.0) {
+	/* Reboot (cx = 584.0, cy = 510.0, r = 16.0) */
+	if (hypot(rel_x - 584.0, rel_y - 510.0) <= 18.0) {
 		diamonds_startmenu_set_visible(menu, false);
 		launch_desktop_cmd("systemctl reboot || reboot &");
 		return true;
 	}
 
-	/* Shutdown */
-	if (rel_x >= 574.0 && rel_x <= 624.0 && rel_y >= 494.0 && rel_y <= 526.0) {
+	/* Shutdown (cx = 626.0, cy = 510.0, r = 16.0) */
+	if (hypot(rel_x - 626.0, rel_y - 510.0) <= 18.0) {
 		diamonds_startmenu_set_visible(menu, false);
 		launch_desktop_cmd("systemctl poweroff || poweroff &");
 		return true;
 	}
 
-	/* 3. Check Left List items (y: 92 to 464, x: 20 to 344) */
-	if (rel_x >= 20.0 && rel_x <= 344.0 && rel_y >= 92.0 && rel_y <= 464.0) {
+	/* 3. Check Left List items (y: 92 to 468, x: 18 to 336) */
+	if (rel_x >= 18.0 && rel_x <= 336.0 && rel_y >= 92.0 && rel_y <= 468.0) {
 		double list_rel_y = (rel_y - 94.0) + menu->scroll_offset;
-		int row_idx = (int)(list_rel_y / 44.0);
+		int row_idx = (int)(list_rel_y / 42.0);
 		if (row_idx >= 0 && row_idx < menu->filtered_count) {
 			int app_idx = menu->filtered_indices[row_idx];
 			diamonds_startmenu_set_visible(menu, false);
@@ -795,10 +822,10 @@ bool diamonds_startmenu_handle_click(struct diamonds_startmenu *menu, double lx,
 		}
 	}
 
-	/* 4. Check Right Pinned Grid (y: 96 to 400, x: 372 to 612) */
-	if (rel_x >= 372.0 && rel_x <= 612.0 && rel_y >= 96.0 && rel_y <= 402.0) {
-		int col = (int)((rel_x - 372.0) / 80.0);
-		int row = (int)((rel_y - 96.0) / 102.0);
+	/* 4. Check Right Pinned Grid (y: 96 to 408, x: 348 to 642) */
+	if (rel_x >= 348.0 && rel_x <= 642.0 && rel_y >= 96.0 && rel_y <= 408.0) {
+		int col = (int)((rel_x - 350.0) / 96.0);
+		int row = (int)((rel_y - 96.0) / 104.0);
 		if (col >= 0 && col < 3 && row >= 0 && row < 3) {
 			int p_idx = row * 3 + col;
 			if (p_idx < menu->pinned_count) {
@@ -813,15 +840,99 @@ bool diamonds_startmenu_handle_click(struct diamonds_startmenu *menu, double lx,
 	return true;
 }
 
+bool diamonds_startmenu_handle_key_event(struct diamonds_startmenu *menu,
+		struct xkb_state *xkb_state, uint32_t keycode,
+		const xkb_keysym_t *syms, int nsyms) {
+	if (!menu || !menu->visible) return false;
+
+	for (int i = 0; i < nsyms; i++) {
+		xkb_keysym_t sym = syms[i];
+
+		if (sym == XKB_KEY_Escape) {
+			if (menu->search_len > 0) {
+				menu->search_len = 0;
+				menu->search_query[0] = '\0';
+				diamonds_startmenu_filter(menu);
+				diamonds_startmenu_render(menu);
+			} else {
+				diamonds_startmenu_set_visible(menu, false);
+			}
+			return true;
+		}
+
+		if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) {
+			if (menu->filtered_count > 0) {
+				int app_idx = menu->filtered_indices[0];
+				diamonds_startmenu_set_visible(menu, false);
+				launch_desktop_cmd(menu->apps[app_idx].exec);
+				return true;
+			}
+			return true;
+		}
+
+		if (sym == XKB_KEY_BackSpace) {
+			if (menu->search_len > 0) {
+				menu->search_len--;
+				while (menu->search_len > 0 &&
+				       (menu->search_query[menu->search_len] & 0xC0) == 0x80) {
+					menu->search_len--;
+				}
+				menu->search_query[menu->search_len] = '\0';
+				menu->scroll_offset = 0.0;
+				diamonds_startmenu_filter(menu);
+				diamonds_startmenu_render(menu);
+			}
+			return true;
+		}
+
+		if (sym == XKB_KEY_Up) {
+			menu->scroll_offset -= 42.0;
+			if (menu->scroll_offset < 0.0) menu->scroll_offset = 0.0;
+			diamonds_startmenu_render(menu);
+			return true;
+		}
+
+		if (sym == XKB_KEY_Down) {
+			menu->scroll_offset += 42.0;
+			if (menu->scroll_offset > menu->max_scroll) menu->scroll_offset = menu->max_scroll;
+			diamonds_startmenu_render(menu);
+			return true;
+		}
+	}
+
+	char utf8_buf[32] = {0};
+	int len = xkb_state_key_get_utf8(xkb_state, keycode, utf8_buf, sizeof(utf8_buf) - 1);
+	if (len > 0 && (unsigned char)utf8_buf[0] >= 0x20 && utf8_buf[0] != 0x7F) {
+		if (menu->search_len + len < (int)sizeof(menu->search_query) - 1) {
+			memcpy(menu->search_query + menu->search_len, utf8_buf, len);
+			menu->search_len += len;
+			menu->search_query[menu->search_len] = '\0';
+			menu->scroll_offset = 0.0;
+			diamonds_startmenu_filter(menu);
+			diamonds_startmenu_render(menu);
+		}
+		return true;
+	}
+
+	return true;
+}
+
 bool diamonds_startmenu_handle_key(struct diamonds_startmenu *menu, xkb_keysym_t sym, enum wl_keyboard_key_state state) {
 	if (!menu || !menu->visible) return false;
 
 	if (state != WL_KEYBOARD_KEY_STATE_PRESSED) {
-		return true; /* Absorb release */
+		return true;
 	}
 
 	if (sym == XKB_KEY_Escape) {
-		diamonds_startmenu_set_visible(menu, false);
+		if (menu->search_len > 0) {
+			menu->search_len = 0;
+			menu->search_query[0] = '\0';
+			diamonds_startmenu_filter(menu);
+			diamonds_startmenu_render(menu);
+		} else {
+			diamonds_startmenu_set_visible(menu, false);
+		}
 		return true;
 	}
 
@@ -836,8 +947,9 @@ bool diamonds_startmenu_handle_key(struct diamonds_startmenu *menu, xkb_keysym_t
 	}
 
 	if (sym == XKB_KEY_BackSpace) {
-		if (menu->search_query_len > 0) {
-			menu->search_query[--menu->search_query_len] = '\0';
+		if (menu->search_len > 0) {
+			menu->search_len--;
+			menu->search_query[menu->search_len] = '\0';
 			diamonds_startmenu_filter(menu);
 			diamonds_startmenu_render(menu);
 		}
@@ -845,24 +957,23 @@ bool diamonds_startmenu_handle_key(struct diamonds_startmenu *menu, xkb_keysym_t
 	}
 
 	if (sym == XKB_KEY_Up) {
-		menu->scroll_offset -= 44.0;
+		menu->scroll_offset -= 42.0;
 		if (menu->scroll_offset < 0.0) menu->scroll_offset = 0.0;
 		diamonds_startmenu_render(menu);
 		return true;
 	}
 
 	if (sym == XKB_KEY_Down) {
-		menu->scroll_offset += 44.0;
+		menu->scroll_offset += 42.0;
 		if (menu->scroll_offset > menu->max_scroll) menu->scroll_offset = menu->max_scroll;
 		diamonds_startmenu_render(menu);
 		return true;
 	}
 
-	/* Printable ASCII */
 	if (sym >= 0x20 && sym <= 0x7E) {
-		if (menu->search_query_len < (int)sizeof(menu->search_query) - 1) {
-			menu->search_query[menu->search_query_len++] = (char)sym;
-			menu->search_query[menu->search_query_len] = '\0';
+		if (menu->search_len < (int)sizeof(menu->search_query) - 1) {
+			menu->search_query[menu->search_len++] = (char)sym;
+			menu->search_query[menu->search_len] = '\0';
 			diamonds_startmenu_filter(menu);
 			diamonds_startmenu_render(menu);
 		}

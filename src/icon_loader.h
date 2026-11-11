@@ -20,4 +20,13 @@ cairo_surface_t *diamonds_load_system_icon(const char *app_key, int size);
  */
 cairo_surface_t *diamonds_load_desktop_icon(const char *icon_key, const char *app_name, int size);
 
+/* Load the icon of a running window from its Wayland app_id or X11 WM_CLASS.
+ * Resolves app_id -> .desktop (file id, StartupWMClass, Exec, reverse-DNS suffix)
+ * -> Icon= -> icon theme file (hicolor/breeze/Adwaita/Yaru/Papirus...).
+ * Works for Qt/KDE apps (e.g. "org.kde.dolphin", "org.qbittorrent.qBittorrent").
+ * alt_name: optional secondary key (e.g. X11 WM_CLASS instance).
+ * Results (including misses) are cached; returned surface is owned by the loader.
+ */
+cairo_surface_t *diamonds_load_app_icon(const char *app_id, const char *alt_name, int size);
+
 #endif /* DIAMONDS_ICON_LOADER_H */

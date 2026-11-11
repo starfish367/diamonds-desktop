@@ -14,6 +14,8 @@ struct diamonds_toplevel;
 struct diamonds_xwayland_surface;
 #endif
 
+#define MAX_DOCK_DYNAMIC_ITEMS 32
+
 /* Right-click popup context menu */
 struct diamonds_dock_popup {
 	struct diamonds_dock *dock;
@@ -33,13 +35,18 @@ struct diamonds_dock_popup {
 	char target_name[64];
 };
 
-/* Item on the Diamonds Dock */
-struct diamonds_dock_item {
-	const char *name;
-	const char *app_id;
-	const char *exec_cmd;
-	bool is_running;
+/* Dynamic unpinned running application on the dock */
+struct diamonds_dock_dynamic_item {
+	struct diamonds_toplevel *toplevel;
+#ifdef DIAMONDS_ENABLE_XWAYLAND
+	struct diamonds_xwayland_surface *xsurface;
+#endif
+	char app_id[128];
+	char title[128];
+	pid_t pid;
 	bool is_focused;
+	bool is_running;
+	double x;
 };
 
 struct diamonds_dock {
@@ -54,6 +61,16 @@ struct diamonds_dock {
 	int32_t margin_bottom;
 	int32_t corner_radius;
 	bool is_full_width;
+
+	/* Dynamic unpinned running applications */
+	struct diamonds_dock_dynamic_item dynamic_items[MAX_DOCK_DYNAMIC_ITEMS];
+	int dynamic_item_count;
+
+	/* Cached layout coordinates for pixel-perfect click detection */
+	double content_start_x;
+	double icons_start_x;
+	double pinned_item_x[5];
+	double trash_x;
 
 	struct diamonds_dock_popup popup;
 };

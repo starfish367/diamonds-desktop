@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Diamonds Calculator
+GenericName=Calculator
+Exec=diamonds-calc
+Icon=accessories-calculator
+StartupWMClass=diamonds-calc
+Categories=Utility;Calculator;
+Terminal=false

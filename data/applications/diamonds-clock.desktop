@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Diamonds Clock
+GenericName=Clock
+Exec=diamonds-clock
+Icon=preferences-system-time
+StartupWMClass=diamonds-clock
+Categories=Utility;Clock;
+Terminal=false

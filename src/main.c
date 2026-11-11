@@ -41,6 +41,27 @@ static void handle_output_frame(struct wl_listener *listener, void *data) {
 	wlr_scene_output_send_frame_done(scene_output, &now);
 }
 
+static void get_toplevel_client_size(struct diamonds_toplevel *toplevel, int32_t *out_w, int32_t *out_h) {
+	int32_t w = 0, h = 0;
+	if (toplevel && toplevel->xdg_toplevel && toplevel->xdg_toplevel->base) {
+		struct wlr_box geo = {0};
+		wlr_xdg_surface_get_geometry(toplevel->xdg_toplevel->base, &geo);
+		if (geo.width > 0 && geo.height > 0) {
+			w = geo.width;
+			h = geo.height;
+		} else if (toplevel->xdg_toplevel->base->surface) {
+			w = toplevel->xdg_toplevel->base->surface->current.width;
+			h = toplevel->xdg_toplevel->base->surface->current.height;
+		}
+		if (w <= 0) w = toplevel->xdg_toplevel->current.width;
+		if (h <= 0) h = toplevel->xdg_toplevel->current.height;
+	}
+	if (w <= 0) w = 640;
+	if (h <= 0) h = 480;
+	if (out_w) *out_w = w;
+	if (out_h) *out_h = h;
+}
+
 static void handle_output_request_state(struct wl_listener *listener, void *data) {
 	struct diamonds_output *output = wl_container_of(listener, output, request_state);
 	const struct wlr_output_event_request_state *event = data;
@@ -71,6 +92,50 @@ static void handle_output_request_state(struct wl_listener *listener, void *data
 				diamonds_startmenu_reposition(server->startmenu, server->dock->x, server->dock->y);
 			}
 		}
+
+		/* Resize any maximized windows to fit the new output dimensions */
+		int32_t top_y = 30;
+		int32_t dock_h = 44;
+		struct diamonds_toplevel *toplevel;
+		wl_list_for_each(toplevel, &server->toplevels, link) {
+			if (toplevel->is_maximized && toplevel->xdg_toplevel) {
+				wlr_scene_node_set_position(&toplevel->scene_tree->node, 0, top_y);
+				int32_t target_h = h - top_y - dock_h;
+				if (toplevel->titlebar_scene_buffer) {
+					target_h -= TITLEBAR_HEIGHT;
+				}
+				if (target_h < 100) target_h = 100;
+				wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, w, target_h);
+				if (toplevel->titlebar_scene_buffer) {
+					diamonds_toplevel_update_titlebar(toplevel);
+				}
+			}
+		}
+#ifdef DIAMONDS_ENABLE_XWAYLAND
+		struct diamonds_xwayland_surface *xsurface;
+		wl_list_for_each(xsurface, &server->xwayland_surfaces, link) {
+			if (xsurface->is_maximized && xsurface->xsurface) {
+				int32_t target_h = h - top_y - dock_h;
+				int32_t client_y = top_y;
+				if (xsurface->titlebar_scene_buffer) {
+					target_h -= TITLEBAR_HEIGHT;
+					client_y += TITLEBAR_HEIGHT;
+				}
+				if (target_h < 100) target_h = 100;
+				xsurface->xsurface->x = 0;
+				xsurface->xsurface->y = client_y;
+				xsurface->xsurface->width = w;
+				xsurface->xsurface->height = target_h;
+				wlr_xwayland_surface_configure(xsurface->xsurface, 0, client_y, w, target_h);
+				if (xsurface->scene_tree) {
+					wlr_scene_node_set_position(&xsurface->scene_tree->node, 0, top_y);
+				}
+				if (xsurface->titlebar_scene_buffer) {
+					diamonds_xwayland_surface_update_titlebar(xsurface);
+				}
+			}
+		}
+#endif
 	}
 }
 
@@ -241,12 +306,26 @@ void diamonds_window_close(struct diamonds_toplevel *toplevel, struct diamonds_x
 
 void diamonds_window_toggle_maximize(struct diamonds_toplevel *toplevel, struct diamonds_xwayland_surface *xsurface) {
 	diamonds_sound_play(DIAMONDS_SOUND_CLICK);
+	const int32_t top_y = 30;
+	const int32_t dock_h = 44;
+
 	if (toplevel && toplevel->xdg_toplevel) {
+		if (!toplevel->is_maximized) {
+			/* Save current unmaximized geometry before maximizing */
+			toplevel->saved_x = toplevel->scene_tree ? toplevel->scene_tree->node.x : 80;
+			toplevel->saved_y = toplevel->scene_tree ? toplevel->scene_tree->node.y : 50;
+			get_toplevel_client_size(toplevel, &toplevel->saved_w, &toplevel->saved_h);
+		}
+
 		toplevel->is_maximized = !toplevel->is_maximized;
 		wlr_xdg_toplevel_set_maximized(toplevel->xdg_toplevel, toplevel->is_maximized);
 
 		if (toplevel->is_maximized) {
-			int32_t screen_w = 1280, screen_h = 720;
+			/* Set tiled on all 4 edges so GTK3/Qt drop CSD shadow margins completely */
+			wlr_xdg_toplevel_set_tiled(toplevel->xdg_toplevel,
+				WLR_EDGE_TOP | WLR_EDGE_BOTTOM | WLR_EDGE_LEFT | WLR_EDGE_RIGHT);
+
+			int32_t screen_w = 1366, screen_h = 768;
 			if (toplevel->server && !wl_list_empty(&toplevel->server->outputs)) {
 				struct diamonds_output *out = wl_container_of(toplevel->server->outputs.next, out, link);
 				if (out->wlr_output && out->wlr_output->width > 0) {
@@ -254,14 +333,23 @@ void diamonds_window_toggle_maximize(struct diamonds_toplevel *toplevel, struct 
 					screen_h = out->wlr_output->height;
 				}
 			}
-			wlr_scene_node_set_position(&toplevel->scene_tree->node, 0, 32);
-			int32_t target_h = screen_h - 32 - 44;
+			wlr_scene_node_set_position(&toplevel->scene_tree->node, 0, top_y);
+			int32_t target_h = screen_h - top_y - dock_h;
 			if (toplevel->titlebar_scene_buffer) {
 				target_h -= TITLEBAR_HEIGHT;
 			}
+			if (target_h < 100) target_h = 100;
 			wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, screen_w, target_h);
 		} else {
-			wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, 0, 0);
+			wlr_xdg_toplevel_set_tiled(toplevel->xdg_toplevel, WLR_EDGE_NONE);
+			int32_t rx = toplevel->saved_x > 0 ? toplevel->saved_x : 80;
+			int32_t ry = toplevel->saved_y >= top_y ? toplevel->saved_y : 46;
+			wlr_scene_node_set_position(&toplevel->scene_tree->node, rx, ry);
+			if (toplevel->saved_w >= 200 && toplevel->saved_h >= 120) {
+				wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, toplevel->saved_w, toplevel->saved_h);
+			} else {
+				wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, 0, 0);
+			}
 		}
 
 		if (toplevel->titlebar_scene_buffer) {
@@ -276,10 +364,17 @@ void diamonds_window_toggle_maximize(struct diamonds_toplevel *toplevel, struct 
 	}
 #ifdef DIAMONDS_ENABLE_XWAYLAND
 	else if (xsurface && xsurface->xsurface) {
+		if (!xsurface->is_maximized) {
+			xsurface->saved_x = xsurface->scene_tree ? xsurface->scene_tree->node.x : xsurface->xsurface->x;
+			xsurface->saved_y = xsurface->scene_tree ? xsurface->scene_tree->node.y : xsurface->xsurface->y;
+			xsurface->saved_w = xsurface->xsurface->width > 100 ? xsurface->xsurface->width : 800;
+			xsurface->saved_h = xsurface->xsurface->height > 100 ? xsurface->xsurface->height : 520;
+		}
+
 		xsurface->is_maximized = !xsurface->is_maximized;
 		wlr_xwayland_surface_set_maximized(xsurface->xsurface, xsurface->is_maximized);
 		if (xsurface->is_maximized) {
-			int32_t screen_w = 1280, screen_h = 720;
+			int32_t screen_w = 1366, screen_h = 768;
 			if (xsurface->server && !wl_list_empty(&xsurface->server->outputs)) {
 				struct diamonds_output *out = wl_container_of(xsurface->server->outputs.next, out, link);
 				if (out->wlr_output && out->wlr_output->width > 0) {
@@ -287,11 +382,38 @@ void diamonds_window_toggle_maximize(struct diamonds_toplevel *toplevel, struct 
 					screen_h = out->wlr_output->height;
 				}
 			}
-			int32_t target_h = screen_h - 32 - 44;
-			wlr_xwayland_surface_configure(xsurface->xsurface, 0, 32, screen_w, target_h);
-			if (xsurface->scene_tree) {
-				wlr_scene_node_set_position(&xsurface->scene_tree->node, 0, 32);
+			int32_t target_h = screen_h - top_y - dock_h;
+			int32_t client_y = top_y;
+			if (xsurface->titlebar_scene_buffer) {
+				target_h -= TITLEBAR_HEIGHT;
+				client_y += TITLEBAR_HEIGHT;
 			}
+			if (target_h < 100) target_h = 100;
+			xsurface->xsurface->x = 0;
+			xsurface->xsurface->y = client_y;
+			xsurface->xsurface->width = screen_w;
+			xsurface->xsurface->height = target_h;
+			wlr_xwayland_surface_configure(xsurface->xsurface, 0, client_y, screen_w, target_h);
+			if (xsurface->scene_tree) {
+				wlr_scene_node_set_position(&xsurface->scene_tree->node, 0, top_y);
+			}
+		} else {
+			int32_t rx = xsurface->saved_x > 0 ? xsurface->saved_x : 80;
+			int32_t ry = xsurface->saved_y >= top_y ? xsurface->saved_y : 50;
+			int32_t rw = xsurface->saved_w > 100 ? xsurface->saved_w : 800;
+			int32_t rh = xsurface->saved_h > 100 ? xsurface->saved_h : 520;
+			int32_t client_y = ry + (xsurface->titlebar_scene_buffer ? TITLEBAR_HEIGHT : 0);
+			xsurface->xsurface->x = rx;
+			xsurface->xsurface->y = client_y;
+			xsurface->xsurface->width = rw;
+			xsurface->xsurface->height = rh;
+			wlr_xwayland_surface_configure(xsurface->xsurface, rx, client_y, rw, rh);
+			if (xsurface->scene_tree) {
+				wlr_scene_node_set_position(&xsurface->scene_tree->node, rx, ry);
+			}
+		}
+		if (xsurface->titlebar_scene_buffer) {
+			diamonds_xwayland_surface_update_titlebar(xsurface);
 		}
 		if (xsurface->server) {
 			diamonds_update_dock_position(xsurface->server);
@@ -360,13 +482,53 @@ static bool toplevel_has_csd(struct diamonds_toplevel *toplevel) {
 static void handle_toplevel_map(struct wl_listener *listener, void *data) {
 	(void)data;
 	struct diamonds_toplevel *toplevel = wl_container_of(listener, toplevel, map);
-	if (!toplevel_has_csd(toplevel)) {
+	if (toplevel->prefers_ssd && !toplevel_has_csd(toplevel)) {
 		diamonds_toplevel_create_titlebar(toplevel);
+		if (toplevel->xdg_tree) {
+			wlr_scene_node_set_position(&toplevel->xdg_tree->node, 0, TITLEBAR_HEIGHT);
+		}
+	} else {
+		if (toplevel->xdg_tree) {
+			wlr_scene_node_set_position(&toplevel->xdg_tree->node, 0, 0);
+		}
 	}
 	wl_list_insert(&toplevel->server->toplevels, &toplevel->link);
-	if (toplevel->scene_tree->node.y < 32) {
-		wlr_scene_node_set_position(&toplevel->scene_tree->node, toplevel->scene_tree->node.x, 32);
+
+	int32_t screen_w = 1366, screen_h = 768;
+	if (toplevel->server && !wl_list_empty(&toplevel->server->outputs)) {
+		struct diamonds_output *out = wl_container_of(toplevel->server->outputs.next, out, link);
+		if (out->wlr_output && out->wlr_output->width > 0) {
+			screen_w = out->wlr_output->width;
+			screen_h = out->wlr_output->height;
+		}
 	}
+
+	int32_t cw = 0, ch = 0;
+	get_toplevel_client_size(toplevel, &cw, &ch);
+	int32_t total_h = ch + (toplevel->titlebar_scene_buffer ? TITLEBAR_HEIGHT : 0);
+	int32_t max_usable_h = screen_h - 30 - 44;
+
+	int32_t nx = toplevel->scene_tree->node.x;
+	int32_t ny = toplevel->scene_tree->node.y;
+	if (nx == 0 && ny == 0) {
+		/* Center newly mapped unpositioned window inside usable workarea */
+		nx = (screen_w - cw) / 2;
+		ny = 30 + (max_usable_h - total_h) / 2;
+	}
+	if (nx < 0) nx = 0;
+	if (ny + total_h > screen_h - 44) {
+		ny = (screen_h - 44) - total_h;
+	}
+	if (ny < 30) ny = 30;
+	wlr_scene_node_set_position(&toplevel->scene_tree->node, nx, ny);
+
+	if (total_h > max_usable_h && !toplevel->is_maximized) {
+		int32_t clamped_ch = max_usable_h - (toplevel->titlebar_scene_buffer ? TITLEBAR_HEIGHT : 0);
+		if (clamped_ch >= 120) {
+			wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, cw, clamped_ch);
+		}
+	}
+
 	diamonds_focus_toplevel(toplevel->server, toplevel);
 	diamonds_update_dock_position(toplevel->server);
 }
@@ -393,7 +555,9 @@ static void handle_toplevel_commit(struct wl_listener *listener, void *data) {
 	if (toplevel->xdg_toplevel->base->initial_commit) {
 		wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, 0, 0);
 	}
-	diamonds_toplevel_update_titlebar(toplevel);
+	if (toplevel->titlebar_scene_buffer) {
+		diamonds_toplevel_update_titlebar(toplevel);
+	}
 }
 
 static void handle_toplevel_request_move(struct wl_listener *listener, void *data) {
@@ -409,6 +573,7 @@ static void handle_toplevel_request_move(struct wl_listener *listener, void *dat
 
 static void handle_toplevel_request_resize(struct wl_listener *listener, void *data) {
 	struct diamonds_toplevel *toplevel = wl_container_of(listener, toplevel, request_resize);
+	if (toplevel->is_maximized) return;
 	struct wlr_xdg_toplevel_resize_event *event = data;
 	struct diamonds_server *server = toplevel->server;
 	server->cursor_mode = DIAMONDS_CURSOR_RESIZE;
@@ -418,20 +583,124 @@ static void handle_toplevel_request_resize(struct wl_listener *listener, void *d
 	server->grab_y = server->cursor->y;
 	server->grab_geobox.x = toplevel->scene_tree->node.x;
 	server->grab_geobox.y = toplevel->scene_tree->node.y;
-	server->grab_geobox.width = toplevel->xdg_toplevel ? toplevel->xdg_toplevel->current.width : 640;
-	server->grab_geobox.height = toplevel->xdg_toplevel ? toplevel->xdg_toplevel->current.height : 480;
+	get_toplevel_client_size(toplevel, &server->grab_geobox.width, &server->grab_geobox.height);
+	if (toplevel->titlebar_scene_buffer) {
+		server->grab_geobox.height += TITLEBAR_HEIGHT;
+	}
 	server->resize_edges = event->edges;
 }
 
 static void handle_toplevel_request_maximize(struct wl_listener *listener, void *data) {
 	(void)data;
 	struct diamonds_toplevel *toplevel = wl_container_of(listener, toplevel, request_maximize);
-	diamonds_window_toggle_maximize(toplevel, NULL);
+	if (!toplevel->xdg_toplevel->base->initialized) {
+		return;
+	}
+	if (toplevel->is_fullscreen) {
+		wlr_xdg_surface_schedule_configure(toplevel->xdg_toplevel->base);
+		return;
+	}
+	if (toplevel->xdg_toplevel->requested.maximized != toplevel->is_maximized) {
+		diamonds_window_toggle_maximize(toplevel, NULL);
+	} else {
+		/* Protocol requires an answering configure even when nothing changes */
+		wlr_xdg_surface_schedule_configure(toplevel->xdg_toplevel->base);
+	}
+}
+
+static void set_chrome_visible(struct diamonds_server *server, bool visible) {
+	if (server->topbar && server->topbar->scene_buffer) {
+		wlr_scene_node_set_enabled(&server->topbar->scene_buffer->node, visible);
+	}
+	if (server->dock && server->dock->scene_buffer) {
+		wlr_scene_node_set_enabled(&server->dock->scene_buffer->node, visible);
+	}
+}
+
+void diamonds_toplevel_set_fullscreen(struct diamonds_toplevel *toplevel, bool fullscreen) {
+	if (!toplevel || !toplevel->xdg_toplevel || toplevel->is_fullscreen == fullscreen) {
+		return;
+	}
+	struct diamonds_server *server = toplevel->server;
+	toplevel->is_fullscreen = fullscreen;
+	wlr_xdg_toplevel_set_fullscreen(toplevel->xdg_toplevel, fullscreen);
+
+	if (fullscreen) {
+		int32_t w = 1366, h = 768;
+		if (!wl_list_empty(&server->outputs)) {
+			struct diamonds_output *out = wl_container_of(server->outputs.next, out, link);
+			if (out->wlr_output && out->wlr_output->width > 0) {
+				w = out->wlr_output->width;
+				h = out->wlr_output->height;
+			}
+		}
+		if (!toplevel->is_maximized) {
+			toplevel->saved_x = toplevel->scene_tree->node.x;
+			toplevel->saved_y = toplevel->scene_tree->node.y;
+			get_toplevel_client_size(toplevel, &toplevel->saved_w, &toplevel->saved_h);
+		}
+		wlr_xdg_toplevel_set_tiled(toplevel->xdg_toplevel,
+			WLR_EDGE_TOP | WLR_EDGE_BOTTOM | WLR_EDGE_LEFT | WLR_EDGE_RIGHT);
+		if (toplevel->titlebar_scene_buffer) {
+			wlr_scene_node_set_enabled(&toplevel->titlebar_scene_buffer->node, false);
+		}
+		if (toplevel->xdg_tree) {
+			wlr_scene_node_set_position(&toplevel->xdg_tree->node, 0, 0);
+		}
+		wlr_scene_node_set_position(&toplevel->scene_tree->node, 0, 0);
+		wlr_scene_node_raise_to_top(&toplevel->scene_tree->node);
+		wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, w, h);
+		set_chrome_visible(server, false);
+	} else {
+		set_chrome_visible(server, true);
+		if (toplevel->titlebar_scene_buffer) {
+			wlr_scene_node_set_enabled(&toplevel->titlebar_scene_buffer->node, true);
+			if (toplevel->xdg_tree) {
+				wlr_scene_node_set_position(&toplevel->xdg_tree->node, 0, TITLEBAR_HEIGHT);
+			}
+		}
+		if (toplevel->is_maximized) {
+			toplevel->is_maximized = false;
+			diamonds_window_toggle_maximize(toplevel, NULL);
+		} else {
+			wlr_xdg_toplevel_set_tiled(toplevel->xdg_toplevel, WLR_EDGE_NONE);
+			int32_t rx = toplevel->saved_x > 0 ? toplevel->saved_x : 80;
+			int32_t ry = toplevel->saved_y >= 30 ? toplevel->saved_y : 46;
+			wlr_scene_node_set_position(&toplevel->scene_tree->node, rx, ry);
+			wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel,
+				toplevel->saved_w >= 200 ? toplevel->saved_w : 0,
+				toplevel->saved_h >= 120 ? toplevel->saved_h : 0);
+		}
+	}
+	if (server && server->wl_display) {
+		wl_display_flush_clients(server->wl_display);
+	}
+}
+
+static void handle_toplevel_request_fullscreen(struct wl_listener *listener, void *data) {
+	(void)data;
+	struct diamonds_toplevel *toplevel = wl_container_of(listener, toplevel, request_fullscreen);
+	if (!toplevel->xdg_toplevel->base->initialized) {
+		return;
+	}
+	diamonds_toplevel_set_fullscreen(toplevel, toplevel->xdg_toplevel->requested.fullscreen);
+	wlr_xdg_surface_schedule_configure(toplevel->xdg_toplevel->base);
 }
 
 static void handle_toplevel_destroy(struct wl_listener *listener, void *data) {
 	(void)data;
 	struct diamonds_toplevel *toplevel = wl_container_of(listener, toplevel, destroy);
+	struct diamonds_server *server = toplevel->server;
+	if (toplevel->is_fullscreen && server) {
+		set_chrome_visible(server, true);
+	}
+	if (server && server->grabbed_toplevel == toplevel) {
+		server->grabbed_toplevel = NULL;
+		server->cursor_mode = DIAMONDS_CURSOR_PASSTHROUGH;
+	}
+	if (server && server->focused_toplevel == toplevel) {
+		server->focused_toplevel = NULL;
+	}
 	diamonds_toplevel_destroy_titlebar(toplevel);
 	wl_list_remove(&toplevel->map.link);
 	wl_list_remove(&toplevel->unmap.link);
@@ -439,15 +708,84 @@ static void handle_toplevel_destroy(struct wl_listener *listener, void *data) {
 	wl_list_remove(&toplevel->request_move.link);
 	wl_list_remove(&toplevel->request_resize.link);
 	wl_list_remove(&toplevel->request_maximize.link);
+	wl_list_remove(&toplevel->request_fullscreen.link);
 	wl_list_remove(&toplevel->destroy.link);
 	free(toplevel);
+	if (server) {
+		diamonds_update_dock_position(server);
+	}
+}
+
+struct diamonds_toplevel_decoration {
+	struct diamonds_server *server;
+	struct wlr_xdg_toplevel_decoration_v1 *wlr_decoration;
+	struct wl_listener request_mode;
+	struct wl_listener destroy;
+};
+
+static void handle_decoration_destroy(struct wl_listener *listener, void *data) {
+	(void)data;
+	struct diamonds_toplevel_decoration *deco = wl_container_of(listener, deco, destroy);
+	wl_list_remove(&deco->request_mode.link);
+	wl_list_remove(&deco->destroy.link);
+	free(deco);
+}
+
+static void handle_decoration_request_mode(struct wl_listener *listener, void *data) {
+	(void)data;
+	struct diamonds_toplevel_decoration *deco = wl_container_of(listener, deco, request_mode);
+	struct diamonds_toplevel *toplevel = NULL;
+	if (deco->wlr_decoration->toplevel && deco->wlr_decoration->toplevel->base && deco->wlr_decoration->toplevel->base->data) {
+		struct wlr_scene_tree *tree = deco->wlr_decoration->toplevel->base->data;
+		toplevel = tree ? tree->node.data : NULL;
+	}
+
+	enum wlr_xdg_toplevel_decoration_v1_mode mode = deco->wlr_decoration->requested_mode;
+	if (mode == WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE) {
+		if (toplevel && toplevel_has_csd(toplevel)) {
+			mode = WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE;
+		}
+	} else {
+		mode = WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE;
+	}
+
+	wlr_xdg_toplevel_decoration_v1_set_mode(deco->wlr_decoration, mode);
+
+	if (toplevel) {
+		toplevel->prefers_ssd = (mode == WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+		if (toplevel->prefers_ssd) {
+			if (!toplevel->titlebar_scene_buffer) {
+				diamonds_toplevel_create_titlebar(toplevel);
+			}
+			if (toplevel->xdg_tree) {
+				wlr_scene_node_set_position(&toplevel->xdg_tree->node, 0, TITLEBAR_HEIGHT);
+			}
+		} else {
+			if (toplevel->titlebar_scene_buffer) {
+				diamonds_toplevel_destroy_titlebar(toplevel);
+			}
+			if (toplevel->xdg_tree) {
+				wlr_scene_node_set_position(&toplevel->xdg_tree->node, 0, 0);
+			}
+		}
+	}
 }
 
 static void server_new_toplevel_decoration(struct wl_listener *listener, void *data) {
-	(void)listener;
-	struct wlr_xdg_toplevel_decoration_v1 *decoration = data;
-	wlr_xdg_toplevel_decoration_v1_set_mode(
-		decoration, WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+	struct diamonds_server *server = wl_container_of(listener, server, new_toplevel_decoration);
+	struct wlr_xdg_toplevel_decoration_v1 *wlr_deco = data;
+	struct diamonds_toplevel_decoration *deco = calloc(1, sizeof(*deco));
+	if (!deco) return;
+	deco->server = server;
+	deco->wlr_decoration = wlr_deco;
+
+	deco->request_mode.notify = handle_decoration_request_mode;
+	wl_signal_add(&wlr_deco->events.request_mode, &deco->request_mode);
+
+	deco->destroy.notify = handle_decoration_destroy;
+	wl_signal_add(&wlr_deco->events.destroy, &deco->destroy);
+
+	handle_decoration_request_mode(&deco->request_mode, NULL);
 }
 
 static void server_new_xdg_surface(struct wl_listener *listener, void *data) {
@@ -466,13 +804,10 @@ static void server_new_xdg_surface(struct wl_listener *listener, void *data) {
 	toplevel->server = server;
 	toplevel->xdg_toplevel = xdg_surface->toplevel;
 	toplevel->workspace = server->current_workspace;
+	toplevel->prefers_ssd = false;
 	toplevel->scene_tree = wlr_scene_tree_create(server->tree_workspaces[server->current_workspace]);
-	struct wlr_scene_tree *xdg_tree = wlr_scene_xdg_surface_create(toplevel->scene_tree, xdg_surface);
-	if (!toplevel_has_csd(toplevel)) {
-		wlr_scene_node_set_position(&xdg_tree->node, 0, TITLEBAR_HEIGHT);
-	} else {
-		wlr_scene_node_set_position(&xdg_tree->node, 0, 0);
-	}
+	toplevel->xdg_tree = wlr_scene_xdg_surface_create(toplevel->scene_tree, xdg_surface);
+	wlr_scene_node_set_position(&toplevel->xdg_tree->node, 0, 0);
 	toplevel->scene_tree->node.data = toplevel;
 	xdg_surface->data = toplevel->scene_tree;
 
@@ -494,21 +829,54 @@ static void server_new_xdg_surface(struct wl_listener *listener, void *data) {
 	toplevel->request_maximize.notify = handle_toplevel_request_maximize;
 	wl_signal_add(&xdg_surface->toplevel->events.request_maximize, &toplevel->request_maximize);
 
+	toplevel->request_fullscreen.notify = handle_toplevel_request_fullscreen;
+	wl_signal_add(&xdg_surface->toplevel->events.request_fullscreen, &toplevel->request_fullscreen);
+
 	toplevel->destroy.notify = handle_toplevel_destroy;
 	wl_signal_add(&xdg_surface->events.destroy, &toplevel->destroy);
 }
 
 #ifdef DIAMONDS_ENABLE_XWAYLAND
+static void handle_xwayland_surface_set_title(struct wl_listener *listener, void *data) {
+	(void)data;
+	struct diamonds_xwayland_surface *xsurface = wl_container_of(listener, xsurface, set_title);
+	diamonds_xwayland_surface_update_titlebar(xsurface);
+}
+
 static void handle_xwayland_surface_request_configure(struct wl_listener *listener, void *data) {
 	struct diamonds_xwayland_surface *xsurface = wl_container_of(listener, xsurface, request_configure);
 	struct wlr_xwayland_surface_configure_event *event = data;
+	if (xsurface->is_maximized) {
+		int32_t screen_w = 1366, screen_h = 768;
+		if (xsurface->server && !wl_list_empty(&xsurface->server->outputs)) {
+			struct diamonds_output *out = wl_container_of(xsurface->server->outputs.next, out, link);
+			if (out->wlr_output && out->wlr_output->width > 0) {
+				screen_w = out->wlr_output->width;
+				screen_h = out->wlr_output->height;
+			}
+		}
+		int32_t target_h = screen_h - 30 - 44;
+		int32_t client_y = 30;
+		if (xsurface->titlebar_scene_buffer) {
+			target_h -= TITLEBAR_HEIGHT;
+			client_y += TITLEBAR_HEIGHT;
+		}
+		wlr_xwayland_surface_configure(xsurface->xsurface, 0, client_y, screen_w, target_h);
+		if (xsurface->scene_tree) {
+			wlr_scene_node_set_position(&xsurface->scene_tree->node, 0, 30);
+		}
+		diamonds_xwayland_surface_update_titlebar(xsurface);
+		return;
+	}
 	int16_t y = event->y;
-	if (y < 32) y = 32;
+	if (y < 30) y = 30;
+	int16_t client_y = y + (xsurface->titlebar_scene_buffer ? TITLEBAR_HEIGHT : 0);
 	wlr_xwayland_surface_configure(xsurface->xsurface,
-		event->x, y, event->width, event->height);
+		event->x, client_y, event->width, event->height);
 	if (xsurface->scene_tree) {
 		wlr_scene_node_set_position(&xsurface->scene_tree->node, event->x, y);
 	}
+	diamonds_xwayland_surface_update_titlebar(xsurface);
 	diamonds_update_dock_position(xsurface->server);
 }
 
@@ -521,12 +889,13 @@ static void handle_xwayland_surface_map(struct wl_listener *listener, void *data
 		wlr_xwayland_set_seat(xsurface->server->xwayland, xsurface->server->seat);
 	}
 	int y = xsurface->xsurface->y;
-	if (y < 32) y = 32;
-	xsurface->xsurface->y = y;
+	if (y < 30) y = 30;
+	xsurface->xsurface->y = y + (xsurface->titlebar_scene_buffer ? TITLEBAR_HEIGHT : 0);
 	if (xsurface->scene_tree) {
 		wlr_scene_node_set_position(&xsurface->scene_tree->node,
 			xsurface->xsurface->x, y);
 	}
+	diamonds_xwayland_surface_update_titlebar(xsurface);
 	diamonds_update_dock_position(xsurface->server);
 }
 
@@ -585,13 +954,27 @@ static void handle_xwayland_surface_associate(struct wl_listener *listener, void
 	}
 
 	xsurface->workspace = xsurface->server->current_workspace;
-	xsurface->scene_tree = wlr_scene_subsurface_tree_create(
-		xsurface->server->tree_workspaces[xsurface->server->current_workspace], wlr_xsurface->surface);
+	xsurface->scene_tree = wlr_scene_tree_create(
+		xsurface->server->tree_workspaces[xsurface->server->current_workspace]);
 	if (xsurface->scene_tree) {
 		int y = wlr_xsurface->y;
 		if (y < 32) y = 32;
 		wlr_scene_node_set_position(&xsurface->scene_tree->node, wlr_xsurface->x, y);
 		xsurface->scene_tree->node.data = xsurface;
+
+		xsurface->surface_tree = wlr_scene_subsurface_tree_create(
+			xsurface->scene_tree, wlr_xsurface->surface);
+		if (xsurface->surface_tree) {
+			if (!wlr_xsurface->override_redirect) {
+				wlr_scene_node_set_position(&xsurface->surface_tree->node, 0, TITLEBAR_HEIGHT);
+			} else {
+				wlr_scene_node_set_position(&xsurface->surface_tree->node, 0, 0);
+			}
+		}
+
+		if (!wlr_xsurface->override_redirect) {
+			diamonds_xwayland_surface_create_titlebar(xsurface);
+		}
 	}
 
 	xsurface->map.notify = handle_xwayland_surface_map;
@@ -599,28 +982,40 @@ static void handle_xwayland_surface_associate(struct wl_listener *listener, void
 
 	xsurface->unmap.notify = handle_xwayland_surface_unmap;
 	wl_signal_add(&wlr_xsurface->surface->events.unmap, &xsurface->unmap);
+
+	xsurface->set_title.notify = handle_xwayland_surface_set_title;
+	wl_signal_add(&wlr_xsurface->events.set_title, &xsurface->set_title);
 }
 
 static void handle_xwayland_surface_dissociate(struct wl_listener *listener, void *data) {
 	(void)data;
 	struct diamonds_xwayland_surface *xsurface = wl_container_of(listener, xsurface, dissociate);
+	struct diamonds_server *server = xsurface->server;
 	if (xsurface->xsurface && xsurface->xsurface->surface) {
 		wl_list_remove(&xsurface->map.link);
 		wl_list_remove(&xsurface->unmap.link);
 	}
+	wl_list_remove(&xsurface->set_title.link);
+	diamonds_xwayland_surface_destroy_titlebar(xsurface);
 	if (xsurface->scene_tree) {
 		wlr_scene_node_destroy(&xsurface->scene_tree->node);
 		xsurface->scene_tree = NULL;
+		xsurface->surface_tree = NULL;
+	}
+	if (server) {
+		diamonds_update_dock_position(server);
 	}
 }
 
 static void handle_xwayland_surface_destroy(struct wl_listener *listener, void *data) {
 	(void)data;
 	struct diamonds_xwayland_surface *xsurface = wl_container_of(listener, xsurface, destroy);
+	struct diamonds_server *server = xsurface->server;
 	if (xsurface->xsurface && xsurface->xsurface->surface) {
 		wl_list_remove(&xsurface->map.link);
 		wl_list_remove(&xsurface->unmap.link);
 	}
+	diamonds_xwayland_surface_destroy_titlebar(xsurface);
 	wl_list_remove(&xsurface->associate.link);
 	wl_list_remove(&xsurface->dissociate.link);
 	wl_list_remove(&xsurface->request_configure.link);
@@ -633,6 +1028,9 @@ static void handle_xwayland_surface_destroy(struct wl_listener *listener, void *
 		wlr_scene_node_destroy(&xsurface->scene_tree->node);
 	}
 	free(xsurface);
+	if (server) {
+		diamonds_update_dock_position(server);
+	}
 }
 
 static void server_new_xwayland_surface(struct wl_listener *listener, void *data) {
@@ -691,6 +1089,75 @@ static bool handle_keybinding(struct diamonds_server *server, uint32_t modifiers
 		wl_display_terminate(server->wl_display);
 		return true;
 	}
+	/* Alt+F10 or Super+Up to toggle maximize on focused window */
+	if (((modifiers & WLR_MODIFIER_ALT) && sym == XKB_KEY_F10) ||
+	    ((modifiers & WLR_MODIFIER_LOGO) && sym == XKB_KEY_Up)) {
+		if (server->focused_toplevel) {
+			diamonds_window_toggle_maximize(server->focused_toplevel, NULL);
+			return true;
+		}
+	}
+	/* Alt+F4 / Super+Q: close focused window */
+	if (((modifiers & WLR_MODIFIER_ALT) && sym == XKB_KEY_F4) ||
+	    ((modifiers & WLR_MODIFIER_LOGO) && (sym == XKB_KEY_q || sym == XKB_KEY_Q))) {
+		if (server->focused_toplevel) {
+			diamonds_window_close(server->focused_toplevel, NULL);
+			return true;
+		}
+	}
+	/* F11: toggle fullscreen on focused window */
+	if (sym == XKB_KEY_F11 && server->focused_toplevel &&
+	    !(server->focused_toplevel->xdg_toplevel->base->surface->mapped == false)) {
+		diamonds_toplevel_set_fullscreen(server->focused_toplevel,
+			!server->focused_toplevel->is_fullscreen);
+		return true;
+	}
+	/* Esc leaves fullscreen only via client; Super+Down restores a maximized window */
+	if ((modifiers & WLR_MODIFIER_LOGO) && sym == XKB_KEY_Down && server->focused_toplevel) {
+		struct diamonds_toplevel *t = server->focused_toplevel;
+		if (t->is_fullscreen) {
+			diamonds_toplevel_set_fullscreen(t, false);
+		} else if (t->is_maximized) {
+			diamonds_window_toggle_maximize(t, NULL);
+		} else {
+			diamonds_window_minimize(t, NULL);
+		}
+		return true;
+	}
+	/* Super+1..4: switch workspace */
+	if ((modifiers & WLR_MODIFIER_LOGO) && sym >= XKB_KEY_1 && sym <= XKB_KEY_4) {
+		diamonds_server_switch_workspace(server, (int)(sym - XKB_KEY_1));
+		return true;
+	}
+	/* Super+E / Super+T / Super+I: files / terminal / settings */
+	if ((modifiers & WLR_MODIFIER_LOGO) && (sym == XKB_KEY_e || sym == XKB_KEY_E)) {
+		launch_files();
+		return true;
+	}
+	if ((modifiers & WLR_MODIFIER_LOGO) && (sym == XKB_KEY_t || sym == XKB_KEY_T)) {
+		launch_terminal();
+		return true;
+	}
+	if ((modifiers & WLR_MODIFIER_LOGO) && (sym == XKB_KEY_i || sym == XKB_KEY_I)) {
+		launch_app("./build/diamonds-settings");
+		return true;
+	}
+	/* Alt+Tab: cycle to the least-recently-used window */
+	if ((modifiers & WLR_MODIFIER_ALT) && sym == XKB_KEY_Tab) {
+		struct diamonds_toplevel *cand = NULL, *it;
+		wl_list_for_each_reverse(it, &server->toplevels, link) {
+			if (it != server->focused_toplevel && it->workspace == server->current_workspace) {
+				cand = it;
+				break;
+			}
+		}
+		if (cand) {
+			wlr_scene_node_set_enabled(&cand->scene_tree->node, true);
+			diamonds_focus_toplevel(server, cand);
+			diamonds_update_dock_position(server);
+		}
+		return true;
+	}
 	return false;
 }
 
@@ -714,9 +1181,11 @@ static void handle_keyboard_key(struct wl_listener *listener, void *data) {
 	}
 
 	if (!handled && server->startmenu && server->startmenu->visible) {
-		for (int i = 0; i < nsyms; i++) {
-			handled = diamonds_startmenu_handle_key(server->startmenu, syms[i], event->state);
-			if (handled) break;
+		if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+			handled = diamonds_startmenu_handle_key_event(
+				server->startmenu, keyboard->wlr_keyboard->xkb_state, keycode, syms, nsyms);
+		} else {
+			handled = true;
 		}
 	}
 
@@ -803,10 +1272,8 @@ static struct diamonds_toplevel *find_toplevel_at(
 		if (!toplevel->scene_tree || !toplevel->scene_tree->node.enabled) continue;
 		int32_t wx = toplevel->scene_tree->node.x;
 		int32_t wy = toplevel->scene_tree->node.y;
-		int32_t ww = toplevel->xdg_toplevel ? toplevel->xdg_toplevel->current.width : 640;
-		int32_t wh = toplevel->xdg_toplevel ? toplevel->xdg_toplevel->current.height : 480;
-		if (ww <= 0) ww = 640;
-		if (wh <= 0) wh = 480;
+		int32_t ww = 640, wh = 480;
+		get_toplevel_client_size(toplevel, &ww, &wh);
 		if (toplevel->titlebar_scene_buffer) {
 			wh += TITLEBAR_HEIGHT;
 		}
@@ -814,10 +1281,12 @@ static struct diamonds_toplevel *find_toplevel_at(
 		if (lx >= wx - BORDER && lx <= wx + ww + BORDER &&
 		    ly >= wy - BORDER && ly <= wy + wh + BORDER) {
 			uint32_t edges = WLR_EDGE_NONE;
-			if (lx <= wx + BORDER) edges |= WLR_EDGE_LEFT;
-			if (lx >= wx + ww - BORDER) edges |= WLR_EDGE_RIGHT;
-			if (ly <= wy + BORDER) edges |= WLR_EDGE_TOP;
-			if (ly >= wy + wh - BORDER) edges |= WLR_EDGE_BOTTOM;
+			if (!toplevel->is_maximized) {
+				if (lx <= wx + BORDER) edges |= WLR_EDGE_LEFT;
+				if (lx >= wx + ww - BORDER) edges |= WLR_EDGE_RIGHT;
+				if (ly <= wy + BORDER) edges |= WLR_EDGE_TOP;
+				if (ly >= wy + wh - BORDER) edges |= WLR_EDGE_BOTTOM;
+			}
 
 			if (out_edges) *out_edges = edges;
 			return toplevel;
@@ -837,20 +1306,25 @@ static struct diamonds_xwayland_surface *find_xwayland_surface_at(
 	wl_list_for_each(xsurface, &server->xwayland_surfaces, link) {
 		if (!xsurface->scene_tree || !xsurface->scene_tree->node.enabled) continue;
 		if (!xsurface->xsurface || !xsurface->xsurface->surface || !xsurface->xsurface->surface->mapped) continue;
-		int32_t wx = xsurface->xsurface->x;
-		int32_t wy = xsurface->xsurface->y;
+		int32_t wx = xsurface->scene_tree ? xsurface->scene_tree->node.x : xsurface->xsurface->x;
+		int32_t wy = xsurface->scene_tree ? xsurface->scene_tree->node.y : xsurface->xsurface->y;
 		int32_t ww = xsurface->xsurface->width;
 		int32_t wh = xsurface->xsurface->height;
+		if (xsurface->titlebar_scene_buffer) {
+			wh += TITLEBAR_HEIGHT;
+		}
 		if (ww <= 0) ww = 640;
 		if (wh <= 0) wh = 480;
 
 		if (lx >= wx - BORDER && lx <= wx + ww + BORDER &&
 		    ly >= wy - BORDER && ly <= wy + wh + BORDER) {
 			uint32_t edges = WLR_EDGE_NONE;
-			if (lx <= wx + BORDER) edges |= WLR_EDGE_LEFT;
-			if (lx >= wx + ww - BORDER) edges |= WLR_EDGE_RIGHT;
-			if (ly <= wy + BORDER) edges |= WLR_EDGE_TOP;
-			if (ly >= wy + wh - BORDER) edges |= WLR_EDGE_BOTTOM;
+			if (!xsurface->is_maximized) {
+				if (lx <= wx + BORDER) edges |= WLR_EDGE_LEFT;
+				if (lx >= wx + ww - BORDER) edges |= WLR_EDGE_RIGHT;
+				if (ly <= wy + BORDER) edges |= WLR_EDGE_TOP;
+				if (ly >= wy + wh - BORDER) edges |= WLR_EDGE_BOTTOM;
+			}
 
 			if (out_edges) *out_edges = edges;
 			return xsurface;
@@ -881,14 +1355,35 @@ static void process_cursor_motion(struct diamonds_server *server, uint32_t time_
 		}
 	}
 
+	if (server->startmenu && server->startmenu->visible) {
+		if (diamonds_startmenu_handle_motion(server->startmenu, server->cursor->x, server->cursor->y)) {
+			wlr_seat_pointer_notify_frame(server->seat);
+		}
+	}
+
 	/* 1. Interactive Move */
 	if (server->cursor_mode == DIAMONDS_CURSOR_MOVE) {
 		int32_t new_x = (int32_t)(server->cursor->x - server->grab_x);
 		int32_t new_y = (int32_t)(server->cursor->y - server->grab_y);
-		/* Chặn cửa sổ tràn lên vùng Top Bar (y >= 32px) */
-		if (new_y < 32) new_y = 32;
+		/* Chặn cửa sổ tràn lên vùng Top Bar (y >= 30px) */
+		if (new_y < 30) new_y = 30;
 
 		if (server->grabbed_toplevel && server->grabbed_toplevel->scene_tree) {
+			if (server->grabbed_toplevel->is_maximized && new_y > 38) {
+				/* Unmaximize proportionally when dragged down from top */
+				struct diamonds_toplevel *t = server->grabbed_toplevel;
+				int32_t rw = t->saved_w >= 200 ? t->saved_w : 800;
+				int32_t rh = t->saved_h >= 120 ? t->saved_h : 520;
+				t->is_maximized = false;
+				wlr_xdg_toplevel_set_maximized(t->xdg_toplevel, false);
+				wlr_xdg_toplevel_set_tiled(t->xdg_toplevel, WLR_EDGE_NONE);
+				wlr_xdg_toplevel_set_size(t->xdg_toplevel, rw, rh);
+				server->grab_x = rw / 2.0;
+				new_x = (int32_t)(server->cursor->x - server->grab_x);
+				if (t->titlebar_scene_buffer) {
+					diamonds_toplevel_update_titlebar(t);
+				}
+			}
 			wlr_scene_node_set_position(&server->grabbed_toplevel->scene_tree->node, new_x, new_y);
 			struct wlr_output *out = wlr_output_layout_output_at(
 				server->output_layout, server->cursor->x, server->cursor->y);
@@ -901,13 +1396,17 @@ static void process_cursor_motion(struct diamonds_server *server, uint32_t time_
 		}
 #ifdef DIAMONDS_ENABLE_XWAYLAND
 		if (server->grabbed_xsurface && server->grabbed_xsurface->xsurface) {
+			int32_t client_y = new_y;
+			if (server->grabbed_xsurface->titlebar_scene_buffer) {
+				client_y += TITLEBAR_HEIGHT;
+			}
 			server->grabbed_xsurface->xsurface->x = new_x;
-			server->grabbed_xsurface->xsurface->y = new_y;
+			server->grabbed_xsurface->xsurface->y = client_y;
 			if (server->grabbed_xsurface->scene_tree) {
 				wlr_scene_node_set_position(&server->grabbed_xsurface->scene_tree->node, new_x, new_y);
 			}
 			wlr_xwayland_surface_configure(server->grabbed_xsurface->xsurface,
-				new_x, new_y,
+				new_x, client_y,
 				server->grabbed_xsurface->xsurface->width,
 				server->grabbed_xsurface->xsurface->height);
 			return;
@@ -978,15 +1477,25 @@ static void process_cursor_motion(struct diamonds_server *server, uint32_t time_
 		}
 #ifdef DIAMONDS_ENABLE_XWAYLAND
 		if (server->grabbed_xsurface && server->grabbed_xsurface->xsurface) {
+			int32_t client_h = new_h;
+			int32_t client_y = new_y;
+			if (server->grabbed_xsurface->titlebar_scene_buffer) {
+				client_h = new_h - TITLEBAR_HEIGHT;
+				if (client_h < 60) client_h = 60;
+				client_y += TITLEBAR_HEIGHT;
+			}
 			server->grabbed_xsurface->xsurface->x = new_x;
-			server->grabbed_xsurface->xsurface->y = new_y;
+			server->grabbed_xsurface->xsurface->y = client_y;
 			server->grabbed_xsurface->xsurface->width = new_w;
-			server->grabbed_xsurface->xsurface->height = new_h;
+			server->grabbed_xsurface->xsurface->height = client_h;
 			if (server->grabbed_xsurface->scene_tree) {
 				wlr_scene_node_set_position(&server->grabbed_xsurface->scene_tree->node, new_x, new_y);
 			}
 			wlr_xwayland_surface_configure(server->grabbed_xsurface->xsurface,
-				new_x, new_y, new_w, new_h);
+				new_x, client_y, new_w, client_h);
+			if (server->grabbed_xsurface->titlebar_scene_buffer) {
+				diamonds_xwayland_surface_update_titlebar(server->grabbed_xsurface);
+			}
 			return;
 		}
 #endif
@@ -1116,9 +1625,9 @@ static void handle_cursor_button(struct wl_listener *listener, void *data) {
 			return;
 		}
 
-		/* 1b. Check Control Center click */
+		/* 1b. Check Control Center click (Liquid Glass) */
 		if (event->button == BTN_LEFT && server->control_center && server->control_center->visible) {
-			if (diamonds_control_center_handle_click(server->control_center, lx, ly)) {
+			if (control_center_handle_click(lx, ly)) {
 				diamonds_sound_play(DIAMONDS_SOUND_CLICK);
 				wlr_seat_pointer_notify_frame(server->seat);
 				return;
@@ -1177,9 +1686,14 @@ static void handle_cursor_button(struct wl_listener *listener, void *data) {
 				server->cursor_mode = DIAMONDS_CURSOR_MOVE;
 				server->grabbed_xsurface = alt_x;
 				server->grabbed_toplevel = NULL;
-				server->grab_x = lx - alt_x->xsurface->x;
-				server->grab_y = ly - alt_x->xsurface->y;
+				int32_t ax = alt_x->scene_tree ? alt_x->scene_tree->node.x : alt_x->xsurface->x;
+				int32_t ay = alt_x->scene_tree ? alt_x->scene_tree->node.y : alt_x->xsurface->y;
+				server->grab_x = lx - ax;
+				server->grab_y = ly - ay;
 				wlr_xwayland_surface_activate(alt_x->xsurface, true);
+				if (alt_x->scene_tree) {
+					wlr_scene_node_raise_to_top(&alt_x->scene_tree->node);
+				}
 				wlr_seat_pointer_notify_frame(server->seat);
 				return;
 			}
@@ -1199,8 +1713,7 @@ static void handle_cursor_button(struct wl_listener *listener, void *data) {
 				server->grab_y = ly;
 				server->grab_geobox.x = target_top->scene_tree->node.x;
 				server->grab_geobox.y = target_top->scene_tree->node.y;
-				server->grab_geobox.width = target_top->xdg_toplevel ? target_top->xdg_toplevel->current.width : 640;
-				server->grab_geobox.height = target_top->xdg_toplevel ? target_top->xdg_toplevel->current.height : 480;
+				get_toplevel_client_size(target_top, &server->grab_geobox.width, &server->grab_geobox.height);
 				if (target_top->titlebar_scene_buffer) {
 					server->grab_geobox.height += TITLEBAR_HEIGHT;
 				}
@@ -1217,12 +1730,18 @@ static void handle_cursor_button(struct wl_listener *listener, void *data) {
 				server->grabbed_toplevel = NULL;
 				server->grab_x = lx;
 				server->grab_y = ly;
-				server->grab_geobox.x = target_x->xsurface->x;
-				server->grab_geobox.y = target_x->xsurface->y;
+				server->grab_geobox.x = target_x->scene_tree ? target_x->scene_tree->node.x : target_x->xsurface->x;
+				server->grab_geobox.y = target_x->scene_tree ? target_x->scene_tree->node.y : target_x->xsurface->y;
 				server->grab_geobox.width = target_x->xsurface->width;
 				server->grab_geobox.height = target_x->xsurface->height;
+				if (target_x->titlebar_scene_buffer) {
+					server->grab_geobox.height += TITLEBAR_HEIGHT;
+				}
 				server->resize_edges = edges;
 				wlr_xwayland_surface_activate(target_x->xsurface, true);
+				if (target_x->scene_tree) {
+					wlr_scene_node_raise_to_top(&target_x->scene_tree->node);
+				}
 				wlr_seat_pointer_notify_frame(server->seat);
 				return;
 			}
@@ -1257,6 +1776,36 @@ static void handle_cursor_button(struct wl_listener *listener, void *data) {
 				}
 			}
 
+#ifdef DIAMONDS_ENABLE_XWAYLAND
+			/* Check if clicked on an xsurface's SSD titlebar */
+			struct diamonds_xwayland_surface *xsurface;
+			wl_list_for_each(xsurface, &server->xwayland_surfaces, link) {
+				if (xsurface->titlebar_scene_buffer &&
+				    node == &xsurface->titlebar_scene_buffer->node) {
+					wlr_xwayland_surface_activate(xsurface->xsurface, true);
+					if (xsurface->scene_tree) {
+						wlr_scene_node_raise_to_top(&xsurface->scene_tree->node);
+					}
+					if (event->button == BTN_LEFT) {
+						diamonds_titlebar_action_t action =
+							diamonds_xwayland_titlebar_handle_click(xsurface, sx, sy);
+						if (action == TITLEBAR_CLICK_MOVE) {
+							server->cursor_mode = DIAMONDS_CURSOR_MOVE;
+							server->grabbed_xsurface = xsurface;
+							server->grabbed_toplevel = NULL;
+							int32_t gx = xsurface->scene_tree ? xsurface->scene_tree->node.x : xsurface->xsurface->x;
+							int32_t gy = xsurface->scene_tree ? xsurface->scene_tree->node.y : xsurface->xsurface->y;
+							server->grab_x = lx - gx;
+							server->grab_y = ly - gy;
+						}
+					}
+					diamonds_update_dock_position(server);
+					wlr_seat_pointer_notify_frame(server->seat);
+					return;
+				}
+			}
+#endif
+
 			/* Check if clicked on client surface */
 			if (node->type == WLR_SCENE_NODE_BUFFER) {
 				struct wlr_scene_buffer *scene_buf = wlr_scene_buffer_from_node(node);
@@ -1289,6 +1838,7 @@ static void handle_cursor_button(struct wl_listener *listener, void *data) {
 	}
 
 	wlr_seat_pointer_notify_button(server->seat, event->time_msec, event->button, event->state);
+	wlr_seat_pointer_notify_frame(server->seat);
 }
 
 static void handle_cursor_axis(struct wl_listener *listener, void *data) {
@@ -1415,7 +1965,12 @@ static bool command_exists(const char *name) {
 }
 
 void launch_terminal(void) {
+	if (access("./build/diamonds-terminal", X_OK) == 0) {
+		launch_app("./build/diamonds-terminal");
+		return;
+	}
 	static const char *terminals[] = {
+		"diamonds-terminal",
 		"terminator",
 		"xfce4-terminal",
 		"foot",
@@ -1432,15 +1987,7 @@ void launch_terminal(void) {
 }
 
 void launch_files(void) {
-	if (command_exists("xdg-open")) {
-		launch_app("xdg-open ~");
-	} else if (command_exists("thunar")) {
-		launch_app("thunar");
-	} else if (command_exists("pcmanfm")) {
-		launch_app("pcmanfm");
-	} else if (command_exists("nautilus")) {
-		launch_app("nautilus");
-	}
+	launch_app("./build/diamonds-files || diamonds-files || xdg-open ~");
 }
 
 void launch_app_menu(struct diamonds_server *server) {
@@ -1515,6 +2062,8 @@ void diamonds_capture_screen(struct diamonds_server *server, const char *filepat
 		/* Window client surface */
 		struct wlr_surface *surface = toplevel->xdg_toplevel->base->surface;
 		if (surface && surface->buffer) {
+			struct wlr_box geo = {0};
+			wlr_xdg_surface_get_geometry(toplevel->xdg_toplevel->base, &geo);
 			struct wlr_buffer *w_buf = surface->buffer->source;
 			void *data = NULL;
 			uint32_t fmt = 0;
@@ -1523,7 +2072,7 @@ void diamonds_capture_screen(struct diamonds_server *server, const char *filepat
 				cairo_surface_t *c_surf = cairo_image_surface_create_for_data(
 					(unsigned char *)data, CAIRO_FORMAT_ARGB32,
 					surface->current.width, surface->current.height, (int)stride);
-				cairo_set_source_surface(cr, c_surf, wx, client_y);
+				cairo_set_source_surface(cr, c_surf, wx - geo.x, client_y - geo.y);
 				cairo_paint(cr);
 				cairo_surface_destroy(c_surf);
 				wlr_buffer_end_data_ptr_access(w_buf);
@@ -1599,9 +2148,11 @@ void diamonds_capture_screen(struct diamonds_server *server, const char *filepat
 		cairo_paint(cr);
 	}
 
-	/* 8. Control Center (if visible) */
-	if (server->control_center && server->control_center->visible && server->control_center->buffer && server->control_center->buffer->cairo_surface) {
-		cairo_set_source_surface(cr, server->control_center->buffer->cairo_surface, server->control_center->x, server->control_center->y);
+	/* 8. Control Center (Liquid Glass overlay) */
+	if (server->control_center && server->control_center->visible &&
+	    server->control_center->buffer && server->control_center->buffer->cairo_surface) {
+		cairo_set_source_surface(cr, server->control_center->buffer->cairo_surface,
+			server->control_center->x, server->control_center->y);
 		cairo_paint(cr);
 	}
 
@@ -1687,6 +2238,12 @@ static int handle_control_ipc(int fd, uint32_t mask, void *data) {
 		} else if (strncmp(buf, "toggle_calendar", 15) == 0) {
 			if (server->calendar) {
 				diamonds_calendar_toggle(server->calendar);
+			}
+			ssize_t w = write(client_fd, "OK\n", 3);
+			(void)w;
+		} else if (strncmp(buf, "maximize", 8) == 0) {
+			if (server->focused_toplevel) {
+				diamonds_window_toggle_maximize(server->focused_toplevel, NULL);
 			}
 			ssize_t w = write(client_fd, "OK\n", 3);
 			(void)w;

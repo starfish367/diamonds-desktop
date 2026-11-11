@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Diamonds Store
+GenericName=App Store
+Exec=diamonds-store
+Icon=system-software-install
+StartupWMClass=diamonds-store
+Categories=System;PackageManager;
+Terminal=false

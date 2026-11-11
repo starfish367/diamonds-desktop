@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Diamonds Settings
+GenericName=Settings
+Exec=diamonds-settings
+Icon=preferences-system
+StartupWMClass=diamonds-settings
+Categories=Settings;
+Terminal=false

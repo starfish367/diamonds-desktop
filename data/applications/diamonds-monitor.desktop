@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Diamonds Monitor
+GenericName=Task Manager
+Exec=diamonds-monitor
+Icon=utilities-system-monitor
+StartupWMClass=diamonds-monitor
+Categories=System;Monitor;
+Terminal=false

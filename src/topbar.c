@@ -197,8 +197,8 @@ void diamonds_topbar_render(struct diamonds_topbar *topbar) {
 		g_object_unref(date_layout);
 	}
 
-	/* 5. Control Center Toggle Pill (Far Right) */
-	double cc_w = 68.0;
+	/* 5. Control Center Toggle Pill (Far Right: Network + Sliders + Battery) */
+	double cc_w = 88.0;
 	double cc_h = 22.0;
 	double cc_x = w - cc_w - 10.0;
 	double cc_y = (h - cc_h) / 2.0;
@@ -218,28 +218,43 @@ void diamonds_topbar_render(struct diamonds_topbar *topbar) {
 		cairo_stroke(cr);
 	}
 
+	/* Mini Wi-Fi / Network wave icon */
+	double w_cx = cc_x + 17.0;
+	double w_cy = cc_y + 15.0;
+	cairo_set_source_rgba(cr, 0.22, 0.74, 0.97, 1.0);
+	cairo_arc(cr, w_cx, w_cy, 1.3, 0.0, 2.0 * M_PI);
+	cairo_fill(cr);
+	cairo_set_line_width(cr, 1.4);
+	cairo_arc(cr, w_cx, w_cy, 4.0, -M_PI * 0.75, -M_PI * 0.25);
+	cairo_stroke(cr);
+	cairo_arc(cr, w_cx, w_cy, 6.8, -M_PI * 0.75, -M_PI * 0.25);
+	cairo_stroke(cr);
+
 	/* Sliders / Control icons inside pill */
 	cairo_set_source_rgba(cr, 0.88, 0.91, 0.95, 1.0);
-	cairo_set_line_width(cr, 1.5);
+	cairo_set_line_width(cr, 1.4);
 	/* Bar 1 with knob */
-	cairo_move_to(cr, cc_x + 14.0, cc_y + 7.0);
-	cairo_line_to(cr, cc_x + 30.0, cc_y + 7.0);
+	cairo_move_to(cr, cc_x + 32.0, cc_y + 7.5);
+	cairo_line_to(cr, cc_x + 48.0, cc_y + 7.5);
 	cairo_stroke(cr);
-	cairo_arc(cr, cc_x + 24.0, cc_y + 7.0, 2.0, 0.0, 2.0 * M_PI);
+	cairo_arc(cr, cc_x + 42.0, cc_y + 7.5, 2.0, 0.0, 2.0 * M_PI);
 	cairo_fill(cr);
 
 	/* Bar 2 with knob */
-	cairo_move_to(cr, cc_x + 14.0, cc_y + 14.0);
-	cairo_line_to(cr, cc_x + 30.0, cc_y + 14.0);
+	cairo_move_to(cr, cc_x + 32.0, cc_y + 14.5);
+	cairo_line_to(cr, cc_x + 48.0, cc_y + 14.5);
 	cairo_stroke(cr);
-	cairo_arc(cr, cc_x + 18.0, cc_y + 14.0, 2.0, 0.0, 2.0 * M_PI);
+	cairo_arc(cr, cc_x + 36.0, cc_y + 14.5, 2.0, 0.0, 2.0 * M_PI);
 	cairo_fill(cr);
 
-	/* Battery outline */
-	diamonds_draw_rounded_rect(cr, cc_x + 38.0, cc_y + 6.5, 18.0, 9.0, 2.0);
-	cairo_set_line_width(cr, 1.0);
+	/* Battery outline + tip */
+	diamonds_draw_rounded_rect(cr, cc_x + 56.0, cc_y + 6.5, 20.0, 9.0, 2.0);
+	cairo_set_line_width(cr, 1.1);
 	cairo_stroke(cr);
-	cairo_rectangle(cr, cc_x + 40.0, cc_y + 8.5, 10.0, 5.0);
+	cairo_rectangle(cr, cc_x + 76.5, cc_y + 9.0, 1.8, 4.0);
+	cairo_fill(cr);
+	cairo_set_source_rgba(cr, 0.30, 0.85, 0.55, 0.95);
+	cairo_rectangle(cr, cc_x + 58.0, cc_y + 8.5, 14.0, 5.0);
 	cairo_fill(cr);
 
 	cairo_destroy(cr);
@@ -283,11 +298,11 @@ bool diamonds_topbar_handle_click(struct diamonds_topbar *topbar, double lx, dou
 	}
 
 	/* Check Control Center pill click */
-	double cc_w = 68.0;
+	double cc_w = 88.0;
 	double cc_x = topbar->width - cc_w - 10.0;
 	if (lx >= cc_x && lx <= cc_x + cc_w) {
+		control_center_toggle(topbar->width, topbar->height);
 		if (topbar->server && topbar->server->control_center) {
-			diamonds_control_center_toggle(topbar->server->control_center);
 			topbar->control_center_active = topbar->server->control_center->visible;
 		} else {
 			topbar->control_center_active = !topbar->control_center_active;

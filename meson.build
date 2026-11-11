@@ -35,7 +35,9 @@ xkbcommon = dependency('xkbcommon')
 pixman = dependency('pixman-1')
 libdrm = dependency('libdrm')
 gdk_pixbuf = dependency('gdk-pixbuf-2.0')
+gtk3 = dependency('gtk+-3.0')
 math_dep = cc.find_library('m', required: false)
+util_dep = cc.find_library('util', required: false)
 
 # XWayland detection
 have_xwayland = wlroots.get_variable(pkgconfig: 'have_xwayland', default_value: 'true') == 'true'
@@ -127,44 +129,109 @@ app_deps = [
   math_dep,
 ]
 
-app_inc = include_directories('apps/common', '.')
+app_inc = include_directories('apps/common', 'include', 'src', '.')
 
 executable(
   'diamonds-files',
-  ['apps/diamonds-files/main.c', app_common_sources],
+  'src/diamonds_files.c',
   include_directories: app_inc,
-  dependencies: app_deps,
+  dependencies: [gtk3, math_dep],
   install: true,
 )
 
 executable(
   'diamonds-store',
-  ['apps/diamonds-store/main.c', app_common_sources],
+  'apps/diamonds-store/main.c',
   include_directories: app_inc,
-  dependencies: app_deps,
+  dependencies: [gtk3, math_dep],
   install: true,
 )
 
 executable(
   'diamonds-clock',
-  ['apps/diamonds-clock/main.c', app_common_sources],
+  'apps/diamonds-clock/main.c',
   include_directories: app_inc,
-  dependencies: app_deps,
-  install: true,
-)
-
-executable(
-  'diamonds-mail',
-  ['apps/diamonds-mail/main.c', app_common_sources],
-  include_directories: app_inc,
-  dependencies: app_deps,
+  dependencies: [gtk3, math_dep],
   install: true,
 )
 
 executable(
   'diamonds-settings',
-  ['apps/diamonds-settings/main.c', app_common_sources],
+  'src/diamonds_settings.c',
   include_directories: app_inc,
-  dependencies: app_deps,
+  dependencies: [gtk3, math_dep],
   install: true,
+)
+
+executable(
+  'diamonds-terminal',
+  'apps/diamonds-terminal/main.c',
+  include_directories: app_inc,
+  dependencies: [gtk3, math_dep, util_dep],
+  install: true,
+)
+
+executable(
+  'diamonds-notes',
+  'apps/diamonds-notes/main.c',
+  include_directories: app_inc,
+  dependencies: [gtk3, math_dep],
+  install: true,
+)
+
+executable(
+  'diamonds-calc',
+  'apps/diamonds-calc/main.c',
+  include_directories: app_inc,
+  dependencies: [gtk3, math_dep],
+  install: true,
+)
+
+executable(
+  'diamonds-photos',
+  'apps/diamonds-photos/main.c',
+  include_directories: app_inc,
+  dependencies: [gtk3, math_dep],
+  install: true,
+)
+
+executable(
+  'diamonds-music',
+  'apps/diamonds-music/main.c',
+  include_directories: app_inc,
+  dependencies: [gtk3, math_dep],
+  install: true,
+)
+
+executable(
+  'diamonds-monitor',
+  'apps/diamonds-monitor/main.c',
+  include_directories: app_inc,
+  dependencies: [gtk3, math_dep],
+  install: true,
+)
+
+executable(
+  'diamonds-mail',
+  'apps/diamonds-mail/main.c',
+  include_directories: app_inc,
+  dependencies: [gtk3, math_dep],
+  install: true,
+)
+
+install_data(
+  [
+    'data/applications/diamonds-terminal.desktop',
+    'data/applications/diamonds-files.desktop',
+    'data/applications/diamonds-notes.desktop',
+    'data/applications/diamonds-calc.desktop',
+    'data/applications/diamonds-photos.desktop',
+    'data/applications/diamonds-music.desktop',
+    'data/applications/diamonds-monitor.desktop',
+    'data/applications/diamonds-mail.desktop',
+    'data/applications/diamonds-clock.desktop',
+    'data/applications/diamonds-store.desktop',
+    'data/applications/diamonds-settings.desktop',
+  ],
+  install_dir: get_option('datadir') / 'applications',
 )

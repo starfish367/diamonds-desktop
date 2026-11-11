@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Diamonds Music
+GenericName=Music Player
+Exec=diamonds-music %F
+Icon=multimedia-audio-player
+StartupWMClass=diamonds-music
+Categories=AudioVideo;Audio;Player;
+Terminal=false
+MimeType=audio/mpeg;audio/flac;audio/ogg;audio/x-wav;

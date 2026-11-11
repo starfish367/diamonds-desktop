@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Diamonds Mail
+GenericName=Mail Client
+Exec=diamonds-mail
+Icon=internet-mail
+StartupWMClass=diamonds-mail
+Categories=Network;Email;
+Terminal=false

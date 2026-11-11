@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Diamonds Files
+GenericName=File Manager
+Exec=diamonds-files %F
+Icon=system-file-manager
+StartupWMClass=diamonds-files
+Categories=System;FileManager;
+Terminal=false
+MimeType=inode/directory;

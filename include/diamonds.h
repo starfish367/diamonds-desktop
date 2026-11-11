@@ -132,13 +132,17 @@ struct diamonds_toplevel {
 	struct diamonds_server *server;
 	struct wlr_xdg_toplevel *xdg_toplevel;
 	struct wlr_scene_tree *scene_tree;
+	struct wlr_scene_tree *xdg_tree;
 	int workspace;
+	bool prefers_ssd;
 
 	/* SSD Titlebar */
 	struct wlr_scene_buffer *titlebar_scene_buffer;
 	struct diamonds_cairo_buffer *titlebar_buffer;
 	int32_t titlebar_width;
 	bool is_maximized;
+	bool is_fullscreen;
+	int32_t saved_x, saved_y, saved_w, saved_h;
 
 	struct wl_listener map;
 	struct wl_listener unmap;
@@ -156,8 +160,16 @@ struct diamonds_xwayland_surface {
 	struct diamonds_server *server;
 	struct wlr_xwayland_surface *xsurface;
 	struct wlr_scene_tree *scene_tree;
+	struct wlr_scene_tree *surface_tree;
 	int workspace;
 	bool is_maximized;
+	int32_t saved_x, saved_y, saved_w, saved_h;
+
+	/* SSD Titlebar */
+	struct wlr_scene_buffer *titlebar_scene_buffer;
+	struct diamonds_cairo_buffer *titlebar_buffer;
+	int32_t titlebar_width;
+
 	struct wl_listener map;
 	struct wl_listener unmap;
 	struct wl_listener associate;
@@ -186,6 +198,7 @@ void diamonds_update_dock_position(struct diamonds_server *server);
 void diamonds_window_close(struct diamonds_toplevel *toplevel, struct diamonds_xwayland_surface *xsurface);
 void diamonds_window_toggle_maximize(struct diamonds_toplevel *toplevel, struct diamonds_xwayland_surface *xsurface);
 void diamonds_window_minimize(struct diamonds_toplevel *toplevel, struct diamonds_xwayland_surface *xsurface);
+void diamonds_toplevel_set_fullscreen(struct diamonds_toplevel *toplevel, bool fullscreen);
 void diamonds_capture_screen(struct diamonds_server *server, const char *filepath);
 void launch_app(const char *cmd);
 void launch_terminal(void);

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Diamonds Photos
+GenericName=Image Viewer
+Exec=diamonds-photos %F
+Icon=image-viewer
+StartupWMClass=diamonds-photos
+Categories=Graphics;Viewer;
+Terminal=false
+MimeType=image/png;image/jpeg;image/gif;image/webp;image/bmp;image/svg+xml;

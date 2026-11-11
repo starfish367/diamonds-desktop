@@ -231,76 +231,29 @@ void diamonds_calendar_render(struct diamonds_calendar *cal) {
 		cairo_move_to(cr, 20.0, sep_y + 12.0);
 		cairo_set_source_rgba(cr, 0.22, 0.74, 0.97, 1.0);
 		pango_cairo_show_layout(cr, layout);
-
-		/* Badge count */
-		diamonds_draw_rounded_rect(cr, w - 42.0, sep_y + 12.0, 22.0, 16.0, 8.0);
-		cairo_set_source_rgba(cr, 0.22, 0.74, 0.97, 0.25);
-		cairo_fill(cr);
-		pango_layout_set_text(layout, "3", -1);
-		cairo_move_to(cr, w - 34.0, sep_y + 12.0);
-		cairo_set_source_rgba(cr, 0.22, 0.74, 0.97, 1.0);
-		pango_cairo_show_layout(cr, layout);
 		g_object_unref(layout);
 	}
 
-	/* Notification items */
-	static const struct {
-		const char *icon;
-		const char *title;
-		const char *time;
-		const char *body;
-	} notifs[] = {
-		{ "💎", "Diamonds Compositor", "Vừa xong", "100% Wayland mượt mà, RAM < 12MB." },
-		{ "⚡", "Snap Assist & Resize", "5p trước", "Kéo viền 8 hướng & chia đôi màn hình." },
-		{ "🎵", "System Audio", "15p trước", "Phản hồi xúc giác âm thanh đã bật." },
-	};
+	/* Empty state: Không có thông báo mới */
+	diamonds_draw_rounded_rect(cr, 16.0, sep_y + 36.0, w - 32.0, 56.0, 8.0);
+	cairo_set_source_rgba(cr, 0.11, 0.12, 0.18, 0.60);
+	cairo_fill_preserve(cr);
+	cairo_set_source_rgba(cr, 0.20, 0.22, 0.30, 0.40);
+	cairo_set_line_width(cr, 1.0);
+	cairo_stroke(cr);
 
-	double card_start_y = sep_y + 36.0;
-	double card_h = 44.0;
-	double card_gap = 8.0;
-
-	for (size_t i = 0; i < 3; i++) {
-		double cy = card_start_y + (double)i * (card_h + card_gap);
-		diamonds_draw_rounded_rect(cr, 16.0, cy, w - 32.0, card_h, 8.0);
-		cairo_set_source_rgba(cr, 0.11, 0.12, 0.18, 0.85);
-		cairo_fill_preserve(cr);
-		cairo_set_source_rgba(cr, 0.20, 0.22, 0.30, 0.5);
-		cairo_set_line_width(cr, 1.0);
-		cairo_stroke(cr);
-
-		/* Icon */
-		layout = pango_cairo_create_layout(cr);
-		if (layout) {
-			PangoFontDescription *desc = pango_font_description_from_string(FONT_SANS " 11");
-			pango_layout_set_font_description(layout, desc);
-			pango_font_description_free(desc);
-			pango_layout_set_text(layout, notifs[i].icon, -1);
-			cairo_move_to(cr, 26.0, cy + 12.0);
-			cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 1.0);
-			pango_cairo_show_layout(cr, layout);
-
-			/* Title & Time */
-			char title_buf[128];
-			snprintf(title_buf, sizeof(title_buf), "%s  •  %s", notifs[i].title, notifs[i].time);
-			desc = pango_font_description_from_string(FONT_SANS " Semibold 8.5");
-			pango_layout_set_font_description(layout, desc);
-			pango_font_description_free(desc);
-			pango_layout_set_text(layout, title_buf, -1);
-			cairo_move_to(cr, 50.0, cy + 6.0);
-			cairo_set_source_rgba(cr, 0.88, 0.91, 0.96, 1.0);
-			pango_cairo_show_layout(cr, layout);
-
-			/* Body */
-			desc = pango_font_description_from_string(FONT_SANS " 8");
-			pango_layout_set_font_description(layout, desc);
-			pango_font_description_free(desc);
-			pango_layout_set_text(layout, notifs[i].body, -1);
-			cairo_move_to(cr, 50.0, cy + 24.0);
-			cairo_set_source_rgba(cr, 0.60, 0.65, 0.75, 1.0);
-			pango_cairo_show_layout(cr, layout);
-
-			g_object_unref(layout);
-		}
+	layout = pango_cairo_create_layout(cr);
+	if (layout) {
+		PangoFontDescription *desc = pango_font_description_from_string(FONT_SANS " 9");
+		pango_layout_set_font_description(layout, desc);
+		pango_font_description_free(desc);
+		pango_layout_set_text(layout, "Không có thông báo mới", -1);
+		int text_w = 0, text_h = 0;
+		pango_layout_get_pixel_size(layout, &text_w, &text_h);
+		cairo_move_to(cr, 16.0 + (w - 32.0 - text_w) / 2.0, sep_y + 36.0 + (56.0 - text_h) / 2.0);
+		cairo_set_source_rgba(cr, 0.55, 0.60, 0.70, 0.85);
+		pango_cairo_show_layout(cr, layout);
+		g_object_unref(layout);
 	}
 
 	cairo_destroy(cr);

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Diamonds Notes
+GenericName=Text Editor
+Exec=diamonds-notes %F
+Icon=accessories-text-editor
+StartupWMClass=diamonds-notes
+Categories=Utility;TextEditor;
+Terminal=false
+MimeType=text/plain;
